@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, timedelta
-import requests
+from datetime import date
 
 # ==========================================
 # KONFIGURACJA STRONY
@@ -23,7 +22,7 @@ def check_password():
         return True
 
     st.title("🔐 Logowanie do Kalkulatora Floty")
-    st.caption("Aplikacja do rozliczania tras Amazon + UTA + Ruptela")
+    st.caption("Aplikacja do rozliczania tras Amazon + UTA")
     
     password = st.text_input("Wpisz hasło dostępu:", type="password")
     
@@ -39,106 +38,25 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# INTEGRACJA RUPTELA FM-API
-# ==========================================
-def fetch_ruptela_objects(api_key):
-    """Pobiera listę aut z oficjalnego FM-API Rupteli"""
-    key = api_key.strip()
-    if not key:
-        return {}, ["Brak klucza API."]
-
-    logs = []
-    vehicles_dict = {}
-
-    # Prawidłowe produkcyjne adresy Ruptela FM-API
-    endpoints = [
-        "https://fm-api.ruptela.com/v1/objects",
-        "https://fm-api.ruptela.com/v1/vehicles",
-        "https://fm-api.ruptela.com/v1/devices"
-    ]
-
-    # Standardowe nagłówki akceptowane przez Ruptela FM API
-    headers_variants = [
-        {"Authorization": f"Bearer {key}", "Accept": "application/json"},
-        {"x-api-key": key, "Accept": "application/json"},
-        {"Authorization": key, "Accept": "application/json"}
-    ]
-
-    for url in endpoints:
-        for headers in headers_variants:
-            try:
-                res = requests.get(url, headers=headers, timeout=5)
-                if res.status_code == 200:
-                    data = res.json()
-                    # Ruptela zwraca dane w kluczu 'data', 'objects' lub bezpośredniej liście
-                    items = []
-                    if isinstance(data, list):
-                        items = data
-                    elif isinstance(data, dict):
-                        items = data.get("data") or data.get("objects") or data.get("vehicles") or []
-
-                    for item in items:
-                        if isinstance(item, dict):
-                            plate = (
-                                item.get("plate") or 
-                                item.get("plate_number") or 
-                                item.get("title") or 
-                                item.get("name") or 
-                                item.get("registration_number") or
-                                str(item.get("id"))
-                            )
-                            obj_id = item.get("id") or item.get("object_id")
-                            if plate and obj_id:
-                                vehicles_dict[str(plate).strip().upper()] = obj_id
-                    
-                    if vehicles_dict:
-                        logs.append(f"✅ Sukces! Pobrano aut: {len(vehicles_dict)} z URL: {url}")
-                        return vehicles_dict, logs
-                    else:
-                        logs.append(f"Otrzymano odpowiedź 200 z {url}, ale brak aut na liście. Treść: {res.text[:100]}")
-                else:
-                    logs.append(f"URL: {url} | Status HTTP: {res.status_code} | Odpowiedź: {res.text[:100]}")
-            except Exception as e:
-                logs.append(f"Błąd połączenia ({url}): {str(e)}")
-
-    return vehicles_dict, logs
-
-# ==========================================
 # INTERFEJS GŁÓWNY
 # ==========================================
 st.title("🚚 Kalkulator Kosztów i Zysku Tras")
-st.caption("Automatyczna integracja z API Ruptela + Koszty UTA + Stawka Amazon")
+st.caption("Rozliczenie tras Amazon Relay + Koszty UTA / Drogowe")
 
 st.sidebar.header("⚙️ Ustawienia i dane trasy")
 
-# 1. SEKCJA API RUPTELA
-default_token = "AAH_rbko_VTPHsO0I4jznCXI5SWsqV-6"
-with st.sidebar.expander("🔑 Integracja Ruptela API", expanded=True):
-    rup_token = st.text_input("Klucz API Ruptela", value=default_token, type="password")
+# 1. LISTA POJAZDÓW FLOTY
+# TUTAJ MOŻESZ DOPISAĆ WIĘCEJ SWOICH REJESTRACJI DO LISTY:
+FLOTA_VEHICLES = ["KN 0782G", "Wpisz inny numer..."]
 
-vehicles_map = {}
-debug_logs = []
+vehicle_choice = st.sidebar.selectbox("🚛 Wybierz pojazd z floty", options=FLOTA_VEHICLES)
 
-if rup_token.strip():
-    with st.spinner("Łączenie z Ruptela FM-API..."):
-        vehicles_map, debug_logs = fetch_ruptela_objects(rup_token)
-
-if not vehicles_map and rup_token.strip():
-    st.warning("⚠️ Nie zaciągnięto listy aut z API.")
-    with st.expander("🔍 Podgląd statusu połączenia", expanded=False):
-        for log in debug_logs:
-            st.code(log, language="text")
-
-# 2. WYBÓR POJAZDU
-if vehicles_map:
-    st.sidebar.success(f"✅ Połączono! Znaleziono **{len(vehicles_map)}** pojazdów.")
-    selected_plate = st.sidebar.selectbox("🚛 Wybierz pojazd z floty Ruptela", options=list(vehicles_map.keys()))
-    selected_obj_id = vehicles_map[selected_plate]
+if vehicle_choice == "Wpisz inny numer...":
+    selected_plate = st.sidebar.text_input("Wpisz numer rejestracyjny", value="KN 0782G").strip().upper()
 else:
-    selected_plate = st.sidebar.text_input("🚛 Numer rejestracyjny pojazdu", value="KN 0782G").strip().upper()
-    selected_obj_id = None
+    selected_plate = vehicle_choice
 
-# 3. DATY I KOSZTY STAŁE
+# 2. DATY I KOSZTY STAŁE
 col_d1, col_d2 = st.sidebar.columns(2)
 start_date = col_d1.date_input("Data od", value=date(2026, 6, 23))
 end_date = col_d2.date_input("Data do", value=date(2026, 6, 28))
@@ -147,16 +65,16 @@ daily_fixed_cost = st.sidebar.number_input("💵 Koszt stały auta (PLN / dzień
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📍 Dystans i Paliwo")
-manual_km = st.sidebar.number_input("🗺️ Przebieg km (z bloku Amazon)", value=4415.8, step=10.0)
-manual_liters = st.sidebar.number_input("⛽ Zużyte paliwo (Litry z UTA)", value=0.0, step=10.0)
+manual_km = st.sidebar.number_input("🗺️ Przebieg km (z bloku Amazon / Ruptela)", value=4415.8, step=10.0)
+manual_liters = st.sidebar.number_input("⛽ Zużyte paliwo (Litry)", value=0.0, step=10.0)
 
-# 4. STAWKA AMAZON
+# 3. STAWKA AMAZON
 with st.sidebar.expander("📦 Stawka za Blok Amazon (€)", expanded=True):
     amazon_rate_eur = st.number_input("Stawka za blok w EUR (€)", value=4942.40, step=100.0)
     rate_amazon_eur = st.number_input("Kurs EUR dla stawki (EUR -> PLN)", value=4.31, step=0.01)
 
-# 5. KOSZTY UTA
-with st.sidebar.expander("💳 Wydatki z UTA / Drogowe", expanded=False):
+# 4. KOSZTY UTA / OPŁATY DROGOWE
+with st.sidebar.expander("💳 Wydatki z UTA / Drogowe", expanded=True):
     cost_pln = st.number_input("Kwota w PLN", value=0.0, step=50.0)
     cost_eur = st.number_input("Kwota w EUR (€)", value=0.0, step=50.0)
     cost_czk = st.number_input("Kwota w CZK (KORONY)", value=0.0, step=100.0)
@@ -170,12 +88,11 @@ calculate_btn = st.sidebar.button("🚀 Przelicz koszty i zysk", type="primary",
 # ==========================================
 # OBLICZENIA I WYNIKI
 # ==========================================
-if calculate_btn:
+if calculate_btn or True:  # Liczy od razu domyślnie
     if start_date > end_date:
         st.error("⚠️ Data początkowa nie może być późniejsza niż końcowa!")
     else:
         final_km = manual_km if manual_km > 0 else 1.0
-        used_fuel = manual_liters
 
         amazon_rate_pln = amazon_rate_eur * rate_amazon_eur
         cost_eur_in_pln = cost_eur * rate_costs_eur
