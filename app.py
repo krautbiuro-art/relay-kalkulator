@@ -48,14 +48,13 @@ class RuptelaAPI:
         self.api_key = api_key.strip()
         self.token = None
 
-    def _authenticate((self)) -> bool:
+    def _authenticate(self) -> bool:
         """Pobiera token sesyjny z API Ruptela"""
         if not self.api_key:
             return False
             
         login_url = f"{self.base_url}/auth/login"
         headers = {"Content-Type": "application/json"}
-        # Obsługa klucza jako tokenu lub danych uwierzytelniających
         payload = {"apiKey": self.api_key}
         
         try:
@@ -65,7 +64,6 @@ class RuptelaAPI:
                 self.token = data.get("token") or data.get("access_token")
                 return True
             else:
-                # Jeśli klucz sam w sobie jest tokenem Bearer:
                 self.token = self.api_key
                 return True
         except Exception:
@@ -88,7 +86,6 @@ class RuptelaAPI:
             "Content-Type": "application/json"
         }
         
-        # Zapytanie o raport podróży / CAN z telematyki
         endpoint = f"{self.base_url}/reports/trips"
         params = {
             "plate": vehicle_plate.replace(" ", ""),
