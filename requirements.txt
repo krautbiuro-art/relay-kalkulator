@@ -1,4 +1,6 @@
-streamlit>=1.35.0
+streamlit>=1.40.0
+starlette>=0.40.0
 pandas
 openpyxl
 requests
+pillow>=11.0.0
