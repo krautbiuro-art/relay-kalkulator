@@ -40,84 +40,92 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# MODUŁ TRUSTTRACK / RUPTELA API (LOGIN + TOKEN)
+# MODUŁ TRACK2.RUPTELA.COM API
 # ==========================================
-class TrustTrackAPI:
+class Track2RuptelaAPI:
     def __init__(self, username: str, password: str, server_url: str):
         self.base_url = server_url.rstrip('/')
         self.username = username.strip()
         self.password = password.strip()
-        self.session_token = None
+        self.token = None
 
     def authenticate(self) -> bool:
-        """ Pobiera token sesyjny z TrustTrack """
+        """ Pobiera token autoryzacyjny z track2.ruptela.com """
         if not self.username or not self.password:
             return False
             
-        auth_url = f"{self.base_url}/auth/login"
+        auth_endpoints = [
+            f"{self.base_url}/auth/login",
+            "https://track2.ruptela.com/api/v1/auth/login",
+            "https://track2.ruptela.com/api/auth/login"
+        ]
+        
         payload = {
             "username": self.username,
             "password": self.password
         }
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
-        try:
-            res = requests.post(auth_url, json=payload, headers=headers, timeout=10)
-            if res.status_code == 200 and "application/json" in res.headers.get("Content-Type", ""):
-                data = res.json()
-                self.session_token = data.get("token") or data.get("access_token") or data.get("key")
-                return True
-        except Exception:
-            pass
+        for url in auth_endpoints:
+            try:
+                res = requests.post(url, json=payload, headers=headers, timeout=8)
+                if res.status_code == 200 and "application/json" in res.headers.get("Content-Type", ""):
+                    data = res.json()
+                    self.token = data.get("token") or data.get("access_token") or data.get("key")
+                    if self.token:
+                        return True
+            except Exception:
+                continue
         return False
 
     def get_trip_data(self, vehicle_plate: str, start_date: date, end_date: date) -> Tuple[float, float, str]:
-        # Domyślnie próbujemy zalogować się danymi
-        if not self.session_token:
-            if not self.authenticate():
-                # Jeśli logowanie loginem nie wyszło, próba podpięcia pod klucz API
-                self.session_token = self.password
-
         clean_plate = vehicle_plate.replace(" ", "").upper()
         
+        # Logowanie jeśli brak tokena
+        if not self.token:
+            if not self.authenticate():
+                # Próba użycia wpisanego ciągu jako bezpośredniego tokena/API Key
+                self.token = self.password
+
         headers = {
-            "Authorization": f"Bearer {self.session_token}",
-            "X-API-KEY": self.session_token,
+            "Authorization": f"Bearer {self.token}",
+            "X-API-KEY": self.token,
             "Accept": "application/json"
         }
         
-        # Oficjalny endpoint raportów TrustTrack
-        report_url = f"{self.base_url}/reports/trips"
+        endpoints = [
+            f"{self.base_url}/reports/trips",
+            f"{self.base_url}/trips",
+            "https://track2.ruptela.com/api/v1/reports/trips"
+        ]
+        
         params = {
             "plate": clean_plate,
+            "registration_number": clean_plate,
             "from": f"{start_date}T00:00:00Z",
             "to": f"{end_date}T23:59:59Z"
         }
 
-        try:
-            res = requests.get(report_url, headers=headers, params=params, timeout=10)
-            
-            if res.status_code == 200 and "application/json" in res.headers.get("Content-Type", ""):
-                data = res.json()
-                trips = data.get("trips") or data.get("items") or (data if isinstance(data, list) else [])
-                
-                if trips:
-                    total_dist_m = sum([float(t.get("distance", t.get("length", 0))) for t in trips if isinstance(t, dict)])
-                    total_fuel_l = sum([float(t.get("fuel_consumed", t.get("fuel", 0))) for t in trips if isinstance(t, dict)])
+        for url in endpoints:
+            try:
+                res = requests.get(url, headers=headers, params=params, timeout=10)
+                if res.status_code == 200 and "application/json" in res.headers.get("Content-Type", ""):
+                    data = res.json()
+                    trips = data.get("trips") or data.get("items") or (data if isinstance(data, list) else [])
                     
-                    dist_km = round(total_dist_m / 1000.0, 2) if total_dist_m > 10000 else round(total_dist_m, 2)
-                    fuel_l = round(total_fuel_l, 2)
-                    
-                    if dist_km > 0:
-                        return dist_km, fuel_l, "OK"
-                else:
-                    return 0.0, 0.0, f"Brak zarejestrowanych tras w panelu TrustTrack dla rejestracji {clean_plate}."
-            elif res.status_code in (401, 403):
-                return 0.0, 0.0, "Nieprawidłowy login, hasło lub klucz API TrustTrack."
-        except Exception as e:
-            return 0.0, 0.0, f"Błąd połączenia: {e}"
+                    if trips:
+                        total_dist_m = sum([float(t.get("distance", t.get("length", 0))) for t in trips if isinstance(t, dict)])
+                        total_fuel_l = sum([float(t.get("fuel_consumed", t.get("fuel", 0))) for t in trips if isinstance(t, dict)])
+                        
+                        dist_km = round(total_dist_m / 1000.0, 2) if total_dist_m > 10000 else round(total_dist_m, 2)
+                        fuel_l = round(total_fuel_l, 2)
+                        
+                        if dist_km > 0:
+                            return dist_km, fuel_l, "OK"
+            except Exception:
+                continue
 
-        return 0.0, 0.0, "Brak połączenia z API. Zastosowano przeliczenie ręczne."
+        return 0.0, 0.0, f"Nie udało się pobrać danych z track2.ruptela.com dla {clean_plate}. Użyto wyliczenia zapasowego."
 
 # ==========================================
 # INTERFEJS GŁÓWNY
@@ -128,16 +136,16 @@ st.caption("Aplikacja do automatycznego pobierania spalania/kilometrów z Ruptel
 st.sidebar.header("⚙️ Ustawienia i dane wejściowe")
 
 # TRUSTTRACK CONFIG
-with st.sidebar.expander("🔑 Logowanie do TrustTrack / Ruptela", expanded=True):
-    tt_user = st.text_input("Login / Użytkownik TrustTrack", value="", help="Login do panelu TrustTrack")
-    tt_pass = st.text_input("Hasło lub Klucz API", type="password", value="", help="Hasło do konta lub Klucz API")
+with st.sidebar.expander("🔑 Logowanie do Track2 Ruptela", expanded=True):
+    tt_user = st.text_input("Login Track2 Ruptela", value="", help="Twój login do track2.ruptela.com")
+    tt_pass = st.text_input("Hasło do konta", type="password", value="", help="Hasło do track2.ruptela.com")
     
     server_url = st.selectbox(
-        "Serwer TrustTrack", 
+        "Serwer Ruptela", 
         [
-            "https://trusttrack.ruptela.com/api/v1",
             "https://track2.ruptela.com/api/v1",
-            "https://api.ruptela.com/v1"
+            "https://track2.ruptela.com/api",
+            "https://trusttrack.ruptela.com/api/v1"
         ],
         index=0
     )
@@ -180,20 +188,19 @@ if calculate_btn:
     if start_date > end_date:
         st.error("⚠️ Data początkowa nie może być późniejsza niż końcowa!")
     else:
-        with st.spinner("Pobieranie danych i przeliczanie tras..."):
-            tt_api = TrustTrackAPI(tt_user, tt_pass, server_url)
-            km_gps, fuel_ruptela_l, api_status = tt_api.get_trip_data(vehicle_plate, start_date, end_date)
+        with st.spinner("Pobieranie danych z track2.ruptela.com..."):
+            api = Track2RuptelaAPI(tt_user, tt_pass, server_url)
+            km_gps, fuel_ruptela_l, api_status = api.get_trip_data(vehicle_plate, start_date, end_date)
             
             if km_gps > 0:
                 final_km = km_gps
-                st.success(f"✅ Pobrano automatycznie z TrustTrack GPS: **{km_gps:.1f} km** | Paliwo: **{fuel_ruptela_l:.1f} L**")
+                st.success(f"✅ Pobrano automatycznie z Track2 Ruptela GPS: **{km_gps:.1f} km** | Paliwo: **{fuel_ruptela_l:.1f} L**")
             else:
                 final_km = manual_km if manual_km > 0 else 1000.0
                 st.warning(f"ℹ️ **Informacja:** {api_status}")
-                st.info(f"Użyto wartości wpisanej ręcznie: **{final_km:.1f} km**")
+                st.info(f"Użyto wartości z bloku / wpisanej ręcznie: **{final_km:.1f} km**")
 
             used_fuel = fuel_ruptela_l if fuel_ruptela_l > 0 else manual_liters
-            fuel_source = "TrustTrack GPS" if fuel_ruptela_l > 0 else ("Ręcznie" if manual_liters > 0 else "Brak")
 
             amazon_rate_pln = amazon_rate_eur * rate_amazon_eur
 
@@ -256,7 +263,7 @@ if calculate_btn:
 
             with col_right:
                 st.subheader("⛽ Statystyki Trasy i Paliwa")
-                st.write(f"- **Dystans:** {final_km:.1f} km ({'Wpisany ręcznie / domyślny' if km_gps == 0 else 'TrustTrack GPS'})")
+                st.write(f"- **Dystans:** {final_km:.1f} km ({'Wpisany ręcznie / zapasowy' if km_gps == 0 else 'Track2 Ruptela GPS'})")
                 st.write(f"- **Dni w trasie:** {num_days} dni (koszt stały {daily_fixed_cost} PLN/dzień)")
                 st.write(f"- **Wpisane litry paliwa:** {used_fuel:.1f} L")
                 if avg_consumption > 0:
@@ -288,4 +295,4 @@ if calculate_btn:
                 type="primary"
             )
 else:
-    st.info("👈 Uzupełnij dane po lewej stronie i kliknij **'Przelicz koszty i zysk'**.")
+    st.info("👈 Wpisz login i hasło do track2.ruptela.com po lewej stronie i kliknij **'Przelicz koszty i zysk'**.")
