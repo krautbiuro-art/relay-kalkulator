@@ -29,7 +29,6 @@ def check_password():
     
     password = st.text_input("Wpisz hasło dostępu:", type="password")
     
-    # TUTAJ MOŻESZ ZMIENIĆ HASŁO DO APLIKACJI (domyślnie: biuro2026)
     if st.button("Zaloguj się", type="primary"):
         if password == "biuro2026":
             st.session_state["password_correct"] = True
@@ -42,33 +41,19 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# 1. MODUŁ RUPTELA API
+# 1. MODUŁ RUPTELA API (Z UŻYCIEM API KEY)
 # ==========================================
 class RuptelaAPI:
-    def __init__(self, base_url: str, username: str, password: str):
+    def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip('/')
-        self.username = username
-        self.password = password
-        self.token = None
-
-    def authenticate(self) -> bool:
-        auth_url = f"{self.base_url}/v1/auth/login"
-        payload = {"username": self.username, "password": self.password}
-        try:
-            response = requests.post(auth_url, json=payload, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                self.token = data.get("token") or data.get("access_token")
-                return True
-            return False
-        except Exception:
-            return False
+        self.api_key = api_key
 
     def get_trip_distance(self, vehicle_plate: str, start_date: date, end_date: date) -> float:
-        if not self.token and not self.authenticate():
+        if not self.api_key:
             return 0.0
 
-        headers = {"Authorization": f"Bearer {self.token}"}
+        # W zależności od specyfikacji API Rupteli klucz podaje się najczęściej jako Bearer token
+        headers = {"Authorization": f"Bearer {self.api_key}"}
         endpoint = f"{self.base_url}/v1/reports/trips"
         params = {
             "plate_number": vehicle_plate,
@@ -157,9 +142,9 @@ st.caption("Aplikacja dla biura do automatycznego przeliczania trasy, paliwa i o
 
 st.sidebar.header("⚙️ Ustawienia i dane wejściowe")
 
-with st.sidebar.expander("🔑 Logowanie Ruptela API"):
-    ruptela_user = st.text_input("Użytkownik Ruptela", value="")
-    ruptela_pass = st.text_input("Hasło Ruptela", type="password", value="")
+# ZAMIANA LOGOWANIA NA API KEY
+with st.sidebar.expander("🔑 Klucz Ruptela API"):
+    ruptela_api_key = st.text_input("Podaj Klucz API (API Key)", type="password", value="", help="Wklej klucz dostępowy do API Ruptela")
 
 vehicle_plate = st.sidebar.text_input("🚛 Numer rejestracyjny pojazdu", value="WI12345").strip().upper()
 
@@ -181,7 +166,7 @@ if calculate_btn:
         st.error("⚠️ Data początkowa nie może być późniejsza niż końcowa!")
     else:
         with st.spinner("Przetwarzanie danych..."):
-            ruptela = RuptelaAPI("https://track2.ruptela.com/api", ruptela_user, ruptela_pass)
+            ruptela = RuptelaAPI("https://track2.ruptela.com/api", ruptela_api_key)
             km_gps = ruptela.get_trip_distance(vehicle_plate, start_date, end_date)
             
             final_km = km_gps if km_gps > 0 else (manual_km if manual_km > 0 else 1000.0)
