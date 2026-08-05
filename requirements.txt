@@ -2,3 +2,5 @@ streamlit>=1.38.0
 pandas
 openpyxl
 requests
+streamlit==1.41.0
+starlette<0.40.0
