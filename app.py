@@ -40,68 +40,44 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# 1. MODUŁ RUPTELA API (Z LOGOWANIEM I DANYCH PALIWA)
+# 1. MODUŁ RUPTELA API
 # ==========================================
 class RuptelaAPI:
-    def __init__(self, api_key: str):
-        self.base_url = "https://api.ruptela.com/v1"
+    def __init__(self, api_key: str, base_host: str):
+        self.base_url = f"{base_host.rstrip('/')}/v1"
         self.api_key = api_key.strip()
-        self.token = None
-
-    def _authenticate(self) -> bool:
-        """Pobiera token sesyjny z API Ruptela"""
-        if not self.api_key:
-            return False
-            
-        login_url = f"{self.base_url}/auth/login"
-        headers = {"Content-Type": "application/json"}
-        payload = {"apiKey": self.api_key}
-        
-        try:
-            res = requests.post(login_url, json=payload, headers=headers, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                self.token = data.get("token") or data.get("access_token")
-                return True
-            else:
-                self.token = self.api_key
-                return True
-        except Exception:
-            self.token = self.api_key
-            return True
 
     def get_vehicle_data(self, vehicle_plate: str, start_date: date, end_date: date) -> Tuple[float, float, str]:
         """
         Pobiera Dystans (km) oraz Zużyte Paliwo (L) z Rupteli.
-        Zwraca: (dystans_km, zuzyte_paliwo_l, status_msg)
         """
         if not self.api_key:
             return 0.0, 0.0, "Brak wpisanego klucza API."
 
-        self._authenticate()
-
         headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json"
+            "Authorization": f"Bearer {self.api_key}",
+            "X-API-KEY": self.api_key,
+            "Accept": "application/json"
         }
         
+        # Endpointy w systemie Ruptela / TrustTrack
         endpoint = f"{self.base_url}/reports/trips"
         params = {
+            "plate_number": vehicle_plate.replace(" ", ""),
             "plate": vehicle_plate.replace(" ", ""),
             "from": f"{start_date}T00:00:00Z",
             "to": f"{end_date}T23:59:59Z"
         }
         
         try:
-            response = requests.get(endpoint, headers=headers, params=params, timeout=12)
+            response = requests.get(endpoint, headers=headers, params=params, timeout=20)
             
             if response.status_code == 200:
                 data = response.json()
-                trips = data.get("items", []) or data.get("trips", []) or (data if isinstance(data, list) else [])
+                trips = data.get("trips", []) or data.get("items", []) or (data if isinstance(data, list) else [])
                 
                 if not trips:
-                    return 0.0, 0.0, f"API połączone, ale brak zarejestrowanych tras dla rejestracji '{vehicle_plate}' w wybranym okresie."
+                    return 0.0, 0.0, f"Połączono z API, ale brak tras dla rejestracji '{vehicle_plate}' w wybranym okresie."
 
                 total_distance_m = 0.0
                 total_fuel_l = 0.0
@@ -115,11 +91,13 @@ class RuptelaAPI:
                 
                 return dist_km, fuel_l, "OK"
 
-            elif response.status_code == 401:
-                return 0.0, 0.0, "Błąd 401: Nieprawidłowy Klucz API (Unauthorized)."
+            elif response.status_code in (401, 403):
+                return 0.0, 0.0, "Błąd autoryzacji (401/403): Nieprawidłowy Klucz API."
             else:
-                return 0.0, 0.0, f"Serwer odpowiedział kodem: {response.status_code}. Sprawdź poprawność rejestracji i klucza."
+                return 0.0, 0.0, f"Serwer odpowiedział kodem: {response.status_code}. Treść: {response.text[:100]}"
 
+        except requests.exceptions.Timeout:
+            return 0.0, 0.0, "Przekroczono czas oczekiwania (Timeout). Sprawdź wybrany serwer API Ruptela."
         except Exception as e:
             return 0.0, 0.0, f"Błąd połączenia: {e}"
 
@@ -131,9 +109,15 @@ st.caption("Aplikacja do automatycznego pobierania spalania/kilometrów z Ruptel
 
 st.sidebar.header("⚙️ Ustawienia i dane wejściowe")
 
-# API KEY RUPTELA
-with st.sidebar.expander("🔑 Klucz Ruptela API", expanded=True):
-    ruptela_api_key = st.text_input("Podaj Klucz API (API Key)", type="password", value="", help="Wklej klucz API z panelu Ruptela")
+# RUPTELA CONFIG
+with st.sidebar.expander("🔑 Ustawienia Ruptela API", expanded=True):
+    ruptela_api_key = st.text_input("Podaj Klucz API (API Key)", type="password", value="", help="Wklej klucz API Ruptela")
+    server_url = st.selectbox(
+        "Serwer Ruptela API", 
+        ["https://track2.ruptela.com/api", "https://api.ruptela.com", "https://trusttrack.ruptela.com/api"],
+        index=0,
+        help="Jeśli główny serwer daje timeout, zmień na wyższy z listy."
+    )
 
 vehicle_plate = st.sidebar.text_input("🚛 Numer rejestracyjny pojazdu", value="KN0782G").strip().upper()
 
@@ -141,7 +125,7 @@ col_d1, col_d2 = st.sidebar.columns(2)
 start_date = col_d1.date_input("Data od", value=date.today() - timedelta(days=7))
 end_date = col_d2.date_input("Data do", value=date.today())
 
-daily_fixed_cost = st.sidebar.number_input("💵 Koszt stały auta (PLN / dzień)", value=180.0, step=10.0)
+daily_fixed_cost = st.sidebar.number_input("💵 Koszt stały auta (PLN / dzień)", value=1140.0, step=10.0)
 manual_km = st.sidebar.number_input("🗺️ Przebieg km (zapasowy, jeśli brak API)", value=0.0, step=50.0)
 
 # ==========================================
@@ -154,7 +138,7 @@ with st.sidebar.expander("📦 Stawka za Blok Amazon (€)", expanded=True):
 # ==========================================
 # FORMULARZ KOSZTÓW UTA
 # ==========================================
-with st.sidebar.expander("💳 Wydatki z UTA (Ręcznie)", expanded=True):
+with st.sidebar.expander("💳 Wydatki z UTA (Ręcznie)", expanded=False):
     cost_pln = st.number_input("Kwota w PLN", value=0.0, step=50.0)
     cost_eur = st.number_input("Kwota w EUR (€)", value=0.0, step=50.0)
     cost_czk = st.number_input("Kwota w CZK (KORONY)", value=0.0, step=100.0)
@@ -172,8 +156,8 @@ if calculate_btn:
     if start_date > end_date:
         st.error("⚠️ Data początkowa nie może być późniejsza niż końcowa!")
     else:
-        with st.spinner("Łączenie z Ruptelą... Pobieranie kilometrów i zużycia paliwa..."):
-            ruptela = RuptelaAPI(ruptela_api_key)
+        with st.spinner("Łączenie z serwerem Ruptela... Pobieranie przebiegu i paliwa..."):
+            ruptela = RuptelaAPI(ruptela_api_key, server_url)
             km_gps, fuel_ruptela_l, api_status = ruptela.get_vehicle_data(vehicle_plate, start_date, end_date)
             
             # Weryfikacja dystansu
