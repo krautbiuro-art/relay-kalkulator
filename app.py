@@ -50,7 +50,7 @@ def fetch_ruptela_objects_with_debug(api_token):
     logs = []
     vehicles_dict = {}
 
-    # Różne warianty autoryzacji stosowane przez Ruptela (API v1 / v2 / TrustTrack)
+    # Różne konwencje nagłówków stosowane przez API Ruptela / TrustTrack
     headers_variants = [
         {"x-api-key": token_clean, "Accept": "application/json"},
         {"Authorization": f"Bearer {token_clean}", "Accept": "application/json"},
@@ -62,7 +62,8 @@ def fetch_ruptela_objects_with_debug(api_token):
         "https://track2.ruptela.com/api/v1/objects",
         "https://track2.ruptela.com/api/v2/objects",
         "https://api.ruptela.com/v1/objects",
-        "https://trusttrack.ruptela.com/api/v1/objects"
+        "https://trusttrack.ruptela.com/api/v1/objects",
+        "https://trusttrack.ruptela.com/api/v1/vehicles"
     ]
 
     for url in endpoints:
@@ -80,12 +81,12 @@ def fetch_ruptela_objects_with_debug(api_token):
                                 vehicles_dict[str(plate).strip().upper()] = obj_id
                     
                     if vehicles_dict:
-                        logs.append(f"SUKCES! Pobrano auta z: {url}")
+                        logs.append(f"✅ SUKCES! Pobrano aut: {len(vehicles_dict)} z adresu {url}")
                         return vehicles_dict, logs
                 else:
-                    logs.append(f"URL: {url} | Status: {res.status_code} | Odpowiedź: {res.text[:150]}")
+                    logs.append(f"❌ URL: {url} | Status: {res.status_code} | Odpowiedź: {res.text[:120]}")
             except Exception as e:
-                logs.append(f"Błąd połączenia z {url}: {str(e)}")
+                logs.append(f"⚠️ Błąd połączenia ({url}): {str(e)}")
 
     return vehicles_dict, logs
 
@@ -97,25 +98,23 @@ st.caption("Automatyczna integracja z API Ruptela + Koszty UTA + Stawka Amazon")
 
 st.sidebar.header("⚙️ Ustawienia i dane trasy")
 
-# 1. SEKACJA API RUPTELA
+# 1. SEKCJA API RUPTELA
 default_token = "AAH_rbko_VTPHsO0I4jznCXI5SWsqV-6"
 with st.sidebar.expander("🔑 Integracja Ruptela API", expanded=True):
     rup_token = st.text_input("Klucz API Ruptela", value=default_token, type="password")
-    
-    vehicles_map = {}
-    debug_logs = []
-    
-    if rup_token.strip():
-        with st.spinner("Diagnostyka połączenia z Ruptela API..."):
-            vehicles_map, debug_logs = fetch_ruptela_objects_with_debug(rup_token)
-        
-        if vehicles_map:
-            st.success(f"✅ Znaleziono aut: **{len(vehicles_map)}**")
-        else:
-            st.warning("⚠️ Nie udało się pobrać listy aut.")
-            with st.expander("🔍 Zobacz szczegóły błędu połączenia (Debug Log)", expanded=False):
-                for log in debug_logs:
-                    st.code(log, language="text")
+
+vehicles_map = {}
+debug_logs = []
+
+if rup_token.strip():
+    with st.spinner("Diagnostyka połączenia z Ruptela API..."):
+        vehicles_map, debug_logs = fetch_ruptela_objects_with_debug(rup_token)
+
+if not vehicles_map and rup_token.strip():
+    st.warning("⚠️ Nie udało się automatycznie pobrać listy aut z API Ruptela.")
+    with st.expander("🔍 Kliknij tutaj, aby zobaczyć szczegóły błędu (Debug Log)", expanded=False):
+        for log in debug_logs:
+            st.code(log, language="text")
 
 # 2. WYBÓR POJAZDU
 if vehicles_map:
