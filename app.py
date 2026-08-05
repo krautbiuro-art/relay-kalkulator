@@ -39,10 +39,10 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# INTEGRACJA RUPTELA API (POBIERANIE AUT)
+# INTEGRACJA RUPTELA FM-API
 # ==========================================
 def fetch_ruptela_objects(api_key):
-    """Pobiera listę aut z API Ruptela za pomocą key/tokenu"""
+    """Pobiera listę aut z oficjalnego FM-API Rupteli"""
     key = api_key.strip()
     if not key:
         return {}, ["Brak klucza API."]
@@ -50,61 +50,56 @@ def fetch_ruptela_objects(api_key):
     logs = []
     vehicles_dict = {}
 
-    # 1. Próba pobrania bezpośredniego z nagłówkiem x-api-key lub Authorization
+    # Prawidłowe produkcyjne adresy Ruptela FM-API
     endpoints = [
-        "https://api.ruptela.com/v1/objects",
-        "https://trusttrack.ruptela.com/api/v1/objects",
-        "https://track2.ruptela.com/api/v1/objects"
+        "https://fm-api.ruptela.com/v1/objects",
+        "https://fm-api.ruptela.com/v1/vehicles",
+        "https://fm-api.ruptela.com/v1/devices"
+    ]
+
+    # Standardowe nagłówki akceptowane przez Ruptela FM API
+    headers_variants = [
+        {"Authorization": f"Bearer {key}", "Accept": "application/json"},
+        {"x-api-key": key, "Accept": "application/json"},
+        {"Authorization": key, "Accept": "application/json"}
     ]
 
     for url in endpoints:
-        for auth_header in [{"x-api-key": key}, {"Authorization": f"Bearer {key}"}, {"Authorization": key}]:
-            headers = {**auth_header, "Content-Type": "application/json", "Accept": "application/json"}
+        for headers in headers_variants:
             try:
-                res = requests.get(url, headers=headers, timeout=6)
-                if res.status_code == 200 and res.text.strip():
+                res = requests.get(url, headers=headers, timeout=5)
+                if res.status_code == 200:
                     data = res.json()
-                    items = data.get("objects") or data.get("vehicles") or data.get("items") or (data if isinstance(data, list) else [])
+                    # Ruptela zwraca dane w kluczu 'data', 'objects' lub bezpośredniej liście
+                    items = []
+                    if isinstance(data, list):
+                        items = data
+                    elif isinstance(data, dict):
+                        items = data.get("data") or data.get("objects") or data.get("vehicles") or []
+
                     for item in items:
                         if isinstance(item, dict):
-                            plate = item.get("plate") or item.get("title") or item.get("name") or str(item.get("id"))
+                            plate = (
+                                item.get("plate") or 
+                                item.get("plate_number") or 
+                                item.get("title") or 
+                                item.get("name") or 
+                                item.get("registration_number") or
+                                str(item.get("id"))
+                            )
                             obj_id = item.get("id") or item.get("object_id")
                             if plate and obj_id:
                                 vehicles_dict[str(plate).strip().upper()] = obj_id
                     
                     if vehicles_dict:
-                        logs.append(f"✅ Pobrano auta z endpointu {url}")
+                        logs.append(f"✅ Sukces! Pobrano aut: {len(vehicles_dict)} z URL: {url}")
                         return vehicles_dict, logs
+                    else:
+                        logs.append(f"Otrzymano odpowiedź 200 z {url}, ale brak aut na liście. Treść: {res.text[:100]}")
                 else:
-                    logs.append(f"HTTP {res.status_code} na {url}")
+                    logs.append(f"URL: {url} | Status HTTP: {res.status_code} | Odpowiedź: {res.text[:100]}")
             except Exception as e:
-                logs.append(f"Błąd {url}: {str(e)}")
-
-    # 2. Próba sesji POST Auth (dla kluczy dostępowych TrustTrack)
-    auth_urls = [
-        "https://trusttrack.ruptela.com/api/v1/authUser",
-        "https://api.ruptela.com/v1/auth"
-    ]
-    for auth_url in auth_urls:
-        try:
-            res = requests.post(auth_url, json={"key": key, "token": key, "apiKey": key}, timeout=6)
-            if res.status_code == 200 and res.text.strip():
-                auth_data = res.json()
-                token = auth_data.get("token") or auth_data.get("access_token")
-                if token:
-                    h = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-                    r_obj = requests.get("https://trusttrack.ruptela.com/api/v1/objects", headers=h, timeout=6)
-                    if r_obj.status_code == 200:
-                        items = r_obj.json().get("objects", [])
-                        for item in items:
-                            plate = item.get("plate") or item.get("title") or item.get("name")
-                            obj_id = item.get("id")
-                            if plate and obj_id:
-                                vehicles_dict[str(plate).strip().upper()] = obj_id
-                        if vehicles_dict:
-                            return vehicles_dict, [f"✅ Autoryzowano pomyślnie przez POST {auth_url}"]
-        except Exception:
-            pass
+                logs.append(f"Błąd połączenia ({url}): {str(e)}")
 
     return vehicles_dict, logs
 
@@ -125,18 +120,18 @@ vehicles_map = {}
 debug_logs = []
 
 if rup_token.strip():
-    with st.spinner("Łączenie z Ruptela API i pobieranie floty..."):
+    with st.spinner("Łączenie z Ruptela FM-API..."):
         vehicles_map, debug_logs = fetch_ruptela_objects(rup_token)
 
 if not vehicles_map and rup_token.strip():
-    st.warning("⚠️ Nie zaciągnięto listy aut automatycznie z API Ruptela.")
+    st.warning("⚠️ Nie zaciągnięto listy aut z API.")
     with st.expander("🔍 Podgląd statusu połączenia", expanded=False):
         for log in debug_logs:
-            st.write(log)
+            st.code(log, language="text")
 
-# 2. WYBÓR POJAZDU (Dynamiczny selectbox po pobraniu z API lub wpis ręczny)
+# 2. WYBÓR POJAZDU
 if vehicles_map:
-    st.sidebar.success(f"✅ Pobrano z Rupteli **{len(vehicles_map)}** pojazdów!")
+    st.sidebar.success(f"✅ Połączono! Znaleziono **{len(vehicles_map)}** pojazdów.")
     selected_plate = st.sidebar.selectbox("🚛 Wybierz pojazd z floty Ruptela", options=list(vehicles_map.keys()))
     selected_obj_id = vehicles_map[selected_plate]
 else:
