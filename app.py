@@ -41,7 +41,7 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# 1. MODUŁ RUPTELA API (Z UŻYCIEM API KEY)
+# 1. MODUŁ RUPTELA API
 # ==========================================
 class RuptelaAPI:
     def __init__(self, base_url: str, api_key: str):
@@ -52,7 +52,6 @@ class RuptelaAPI:
         if not self.api_key:
             return 0.0
 
-        # W zależności od specyfikacji API Rupteli klucz podaje się najczęściej jako Bearer token
         headers = {"Authorization": f"Bearer {self.api_key}"}
         endpoint = f"{self.base_url}/v1/reports/trips"
         params = {
@@ -71,82 +70,18 @@ class RuptelaAPI:
         return 0.0
 
 # ==========================================
-# 2. MODUŁ PARSERA UTA
-# ==========================================
-class UTAParser:
-    @staticmethod
-    def load_transactions(file) -> pd.DataFrame:
-        if file.name.endswith('.csv'):
-            try:
-                df = pd.read_csv(file, sep=';', encoding='utf-8')
-            except Exception:
-                file.seek(0)
-                df = pd.read_csv(file, sep=',', encoding='utf-8')
-        elif file.name.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(file)
-        else:
-            raise ValueError("Nieobsługiwany format pliku. Wgraj CSV lub XLSX.")
-        
-        df.columns = df.columns.str.strip()
-        return df
-
-    @staticmethod
-    def calculate_vehicle_costs(df: pd.DataFrame, vehicle_plate: str, start_date: date, end_date: date) -> Dict[str, Any]:
-        date_col = next((c for c in df.columns if 'data' in c.lower() or 'date' in c.lower()), None)
-        plate_col = next((c for c in df.columns if 'rejestracyjny' in c.lower() or 'plate' in c.lower() or 'pojazd' in c.lower() or 'karta' in c.lower()), None)
-        cat_col = next((c for c in df.columns if 'kategoria' in c.lower() or 'produkt' in c.lower() or 'opis' in c.lower() or 'artykuł' in c.lower()), None)
-        amount_col = next((c for c in df.columns if 'netto' in c.lower() or 'kwota' in c.lower() or 'wartosc' in c.lower()), None)
-        qty_col = next((c for c in df.columns if 'ilość' in c.lower() or 'ilosc' in c.lower() or 'litry' in c.lower()), None)
-
-        if not all([date_col, plate_col, cat_col, amount_col]):
-            st.warning("Uwaga: Plik z UTA został wczytany, ale niektóre nazwy kolumn różnią się od standardowych.")
-
-        df['Data_dt'] = pd.to_datetime(df[date_col], errors='coerce') if date_col else pd.NaT
-        
-        start_dt = pd.to_datetime(start_date)
-        end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-
-        clean_plate = vehicle_plate.replace(" ", "").upper()
-        
-        filtered = df
-        if plate_col:
-            filtered = filtered[filtered[plate_col].astype(str).str.replace(" ", "").str.upper().str.contains(clean_plate, na=False)]
-        if date_col:
-            filtered = filtered[(filtered['Data_dt'] >= start_dt) & (filtered['Data_dt'] <= end_dt)]
-
-        if filtered.empty:
-            return {"paliwo_netto": 0.0, "oplaty_drogowe_netto": 0.0, "litry_paliwa": 0.0, "tabela_transakcji": pd.DataFrame()}
-
-        paliwo_mask = filtered[cat_col].astype(str).str.contains('Paliwo|Diesel|ON|Fuel', case=False, na=False) if cat_col else pd.Series(True, index=filtered.index)
-        oplaty_mask = filtered[cat_col].astype(str).str.contains('Opłata|Toll|e-TOLL|Tunel|Autostrada|Road', case=False, na=False) if cat_col else pd.Series(False, index=filtered.index)
-
-        paliwo_netto = pd.to_numeric(filtered.loc[paliwo_mask, amount_col].astype(str).str.replace(',', '.'), errors='coerce').sum() if amount_col else 0.0
-        oplaty_netto = pd.to_numeric(filtered.loc[oplaty_mask, amount_col].astype(str).str.replace(',', '.'), errors='coerce').sum() if amount_col else 0.0
-        
-        litry = 0.0
-        if qty_col:
-            litry = pd.to_numeric(filtered.loc[paliwo_mask, qty_col].astype(str).str.replace(',', '.'), errors='coerce').sum()
-
-        return {
-            "paliwo_netto": round(float(paliwo_netto), 2),
-            "oplaty_drogowe_netto": round(float(oplaty_netto), 2),
-            "litry_paliwa": round(float(litry), 2),
-            "tabela_transakcji": filtered
-        }
-
-# ==========================================
 # INTERFEJS GŁÓWNY
 # ==========================================
 st.title("🚚 Kalkulator Kosztów Tras (Ruptela + UTA)")
-st.caption("Aplikacja dla biura do automatycznego przeliczania trasy, paliwa i opłat drogowych.")
+st.caption("Aplikacja dla biura do automatycznego przeliczania tras i ręcznego wprowadzania kosztów z UTA.")
 
 st.sidebar.header("⚙️ Ustawienia i dane wejściowe")
 
-# ZAMIANA LOGOWANIA NA API KEY
+# API KEY RUPTELA
 with st.sidebar.expander("🔑 Klucz Ruptela API"):
     ruptela_api_key = st.text_input("Podaj Klucz API (API Key)", type="password", value="", help="Wklej klucz dostępowy do API Ruptela")
 
-vehicle_plate = st.sidebar.text_input("🚛 Numer rejestracyjny pojazdu", value="WI12345").strip().upper()
+vehicle_plate = st.sidebar.text_input("🚛 Numer rejestracyjny pojazdu", value="KN0782G").strip().upper()
 
 col_d1, col_d2 = st.sidebar.columns(2)
 start_date = col_d1.date_input("Data od", value=date.today() - timedelta(days=7))
@@ -155,67 +90,88 @@ end_date = col_d2.date_input("Data do", value=date.today())
 daily_fixed_cost = st.sidebar.number_input("💵 Koszt stały auta (PLN / dzień)", value=180.0, step=10.0)
 manual_km = st.sidebar.number_input("🗺️ Przebieg km (jeśli brak połączenia API)", value=0.0, step=50.0)
 
-uploaded_file = st.sidebar.file_uploader("📂 Wgraj plik z fakturą UTA (CSV / XLSX)", type=["csv", "xlsx", "xls"])
+# ==========================================
+# FORMULARZ KOSZTÓW UTA (ZAMIAST FAKTURY)
+# ==========================================
+with st.sidebar.expander("💳 Wydatki z UTA (Ręcznie)", expanded=True):
+    st.markdown("**Wpisz kwoty w poszczególnych walutach:**")
+    cost_pln = st.number_input("Kwota w PLN", value=0.0, step=50.0)
+    cost_eur = st.number_input("Kwota w EUR (€)", value=0.0, step=50.0)
+    cost_czk = st.number_input("Kwota w CZK (KORONY)", value=0.0, step=100.0)
+    
+    st.markdown("---")
+    st.markdown("**Kursy walut (do przeliczenia na PLN):**")
+    rate_eur = st.number_input("Kurs EUR -> PLN", value=4.30, step=0.01)
+    rate_czk = st.number_input("Kurs CZK -> PLN", value=0.17, step=0.01)
+    
+    st.markdown("---")
+    total_liters = st.number_input("⛽ Zatankowane litry (L)", value=0.0, step=10.0, help="Potrzebne do wyliczenia średniego spalania")
 
 calculate_btn = st.sidebar.button("🚀 Oblicz koszty trasy", type="primary", use_container_width=True)
 
 if calculate_btn:
-    if not uploaded_file:
-        st.error("⚠️ Proszę wgrać plik z fakturą UTA w panelu po lewej stronie!")
-    elif start_date > end_date:
+    if start_date > end_date:
         st.error("⚠️ Data początkowa nie może być późniejsza niż końcowa!")
     else:
         with st.spinner("Przetwarzanie danych..."):
+            # Pobieranie dystansu z Ruptela lub opcji ręcznej
             ruptela = RuptelaAPI("https://track2.ruptela.com/api", ruptela_api_key)
             km_gps = ruptela.get_trip_distance(vehicle_plate, start_date, end_date)
             
             final_km = km_gps if km_gps > 0 else (manual_km if manual_km > 0 else 1000.0)
 
-            try:
-                df_uta = UTAParser.load_transactions(uploaded_file)
-                uta_res = UTAParser.calculate_vehicle_costs(df_uta, vehicle_plate, start_date, end_date)
-            except Exception as e:
-                st.error(f"Błąd podczas odczytu pliku UTA: {e}")
-                st.stop()
+            # Obliczenia finansowe
+            cost_eur_in_pln = cost_eur * rate_eur
+            cost_czk_in_pln = cost_czk * rate_czk
+            total_uta_pln = cost_pln + cost_eur_in_pln + cost_czk_in_pln
 
             num_days = (end_date - start_date).days + 1
             total_fixed = num_days * daily_fixed_cost
-            total_variable = uta_res["paliwo_netto"] + uta_res["oplaty_drogowe_netto"]
-            total_cost = total_fixed + total_variable
+            total_cost = total_fixed + total_uta_pln
             
             cost_per_km = round(total_cost / final_km, 2) if final_km > 0 else 0.0
-            avg_consumption = round((uta_res["litry_paliwa"] / final_km) * 100, 2) if final_km > 0 else 0.0
+            avg_consumption = round((total_liters / final_km) * 100, 2) if final_km > 0 else 0.0
 
+            # Prezentacja wyników
             st.success(f"Rozliczono pojazd **{vehicle_plate}** za okres **{start_date}** do **{end_date}** ({num_days} dni).")
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Łączny Przebieg", f"{final_km:.1f} km", delta="GPS Ruptela" if km_gps > 0 else "Ręczny / Wzorcowy")
             m2.metric("Suma Kosztów", f"{total_cost:.2f} PLN")
             m3.metric("Koszt 1 km", f"{cost_per_km:.2f} PLN/km")
-            m4.metric("Średnie Spalanie", f"{avg_consumption:.2f} L/100km")
+            m4.metric("Średnie Spalanie", f"{avg_consumption:.2f} L/100km" if total_liters > 0 else "Brak danych L")
 
             st.markdown("---")
 
             col_left, col_right = st.columns(2)
 
             with col_left:
-                st.subheader("📊 Podsumowanie Kosztów")
+                st.subheader("📊 Podsumowanie Kosztów (PLN)")
                 summary_data = {
-                    "Kategoria": ["Paliwo (netto)", "Opłaty drogowe (netto)", "Koszty stałe (leasing/ubezpieczenie)", "SUMA CAŁKOWITA"],
-                    "Kwota (PLN)": [uta_res["paliwo_netto"], uta_res["oplaty_drogowe_netto"], total_fixed, round(total_cost, 2)],
+                    "Kategoria": [
+                        "Wydatki UTA w PLN", 
+                        f"Wydatki UTA w EUR ({cost_eur:.2f} €)", 
+                        f"Wydatki UTA w CZK ({cost_czk:.2f} CZK)", 
+                        "Koszty stałe (leasing/ubezpieczenie)", 
+                        "SUMA CAŁKOWITA"
+                    ],
+                    "Kwota (PLN)": [
+                        round(cost_pln, 2), 
+                        round(cost_eur_in_pln, 2), 
+                        round(cost_czk_in_pln, 2), 
+                        round(total_fixed, 2), 
+                        round(total_cost, 2)
+                    ],
                 }
                 st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
 
             with col_right:
-                st.subheader("⛽ Dane Paliwowe")
-                st.write(f"- **Ilość paliwa:** {uta_res['litry_paliwa']} L")
-                st.write(f"- **Średnie spalanie:** {avg_consumption} L / 100 km")
-                st.write(f"- **Dni w trasie:** {num_days} dni (stawką {daily_fixed_cost} PLN/dzień)")
-
-            if not uta_res["tabela_transakcji"].empty:
-                st.markdown("---")
-                st.subheader("🧾 Transakcje przypisane do tego auta z pliku UTA")
-                st.dataframe(uta_res["tabela_transakcji"], use_container_width=True)
+                st.subheader("⛽ Podsumowanie Tras i Paliwa")
+                st.write(f"- **Dni w trasie:** {num_days} dni (stawka {daily_fixed_cost} PLN/dzień)")
+                st.write(f"- **Wpisane litry paliwa:** {total_liters} L")
+                st.write(f"- **Wyliczone spalanie:** {avg_consumption} L / 100 km")
+                st.write(f"- **Zastosowany kurs EUR:** {rate_eur} PLN")
+                st.write(f"- **Zastosowany kurs CZK:** {rate_czk} PLN")
 
             st.markdown("---")
             report_df = pd.DataFrame([{
@@ -224,10 +180,12 @@ if calculate_btn:
                 "Data do": end_date,
                 "Dni": num_days,
                 "Przebieg km": final_km,
-                "Paliwo PLN": uta_res["paliwo_netto"],
-                "Litry L": uta_res["litry_paliwa"],
+                "Wydatki PLN": cost_pln,
+                "Wydatki EUR (€)": cost_eur,
+                "Wydatki CZK": cost_czk,
+                "Suma UTA w PLN": total_uta_pln,
+                "Litry L": total_liters,
                 "Spalanie L/100km": avg_consumption,
-                "Oplaty drogowe PLN": uta_res["oplaty_drogowe_netto"],
                 "Koszty stale PLN": total_fixed,
                 "Suma kosztow PLN": total_cost,
                 "Koszt PLN/km": cost_per_km
