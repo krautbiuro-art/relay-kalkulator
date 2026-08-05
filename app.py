@@ -39,77 +39,55 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# FUNKCJE API RUPTELA (PRODUKCYJNE API KEY)
+# FUNKCJA DIAGNOSTYCZNA RUPTELA API
 # ==========================================
-def get_ruptela_headers(token):
-    """Zwraca nagłówki autoryzacyjne dla Rupteli."""
-    t = token.strip()
-    return {
-        "x-api-key": t,
-        "Authorization": f"Bearer {t}",
-        "AppKey": t,
-        "Accept": "application/json"
-    }
+def fetch_ruptela_objects_with_debug(api_token):
+    """Pobiera listę aut i zwraca dokładne komunikaty diagnostyczne"""
+    token_clean = api_token.strip()
+    if not token_clean:
+        return {}, ["Brak wprowadzonego klucza API."]
 
-@st.cache_data(ttl=300)
-def fetch_ruptela_objects(api_token):
-    """Pobiera listę aut z Rupteli na podstawie API Key"""
-    if not api_token.strip():
-        return {}
-    
-    headers = get_ruptela_headers(api_token)
+    logs = []
+    vehicles_dict = {}
+
+    # Różne warianty autoryzacji stosowane przez Ruptela (API v1 / v2 / TrustTrack)
+    headers_variants = [
+        {"x-api-key": token_clean, "Accept": "application/json"},
+        {"Authorization": f"Bearer {token_clean}", "Accept": "application/json"},
+        {"AppKey": token_clean, "Accept": "application/json"},
+        {"Authorization": token_clean, "Accept": "application/json"}
+    ]
+
     endpoints = [
         "https://track2.ruptela.com/api/v1/objects",
-        "https://track2.ruptela.com/api/v1/vehicles",
-        "https://api.ruptela.com/v1/objects"
+        "https://track2.ruptela.com/api/v2/objects",
+        "https://api.ruptela.com/v1/objects",
+        "https://trusttrack.ruptela.com/api/v1/objects"
     ]
-    
-    vehicles_dict = {}
-    for url in endpoints:
-        try:
-            res = requests.get(url, headers=headers, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                items = data.get("objects") or data.get("vehicles") or data.get("items") or (data if isinstance(data, list) else [])
-                for item in items:
-                    if isinstance(item, dict):
-                        plate = item.get("plate") or item.get("title") or item.get("name") or str(item.get("id"))
-                        obj_id = item.get("id") or item.get("object_id")
-                        if plate and obj_id:
-                            vehicles_dict[str(plate).strip().upper()] = obj_id
-                if vehicles_dict:
-                    break
-        except Exception:
-            continue
-            
-    return vehicles_dict
 
-def fetch_ruptela_trips(api_token, object_id, plate, start_date, end_date):
-    """Pobiera przebieg i paliwo dla wybranego pojazdu"""
-    headers = get_ruptela_headers(api_token)
-    url = "https://track2.ruptela.com/api/v1/reports/trips"
-    
-    params = {
-        "object_id": object_id,
-        "plate": plate,
-        "from": f"{start_date}T00:00:00Z",
-        "to": f"{end_date}T23:59:59Z"
-    }
-    
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=8)
-        if res.status_code == 200:
-            data = res.json()
-            trips = data.get("trips") or data.get("items") or (data if isinstance(data, list) else [])
-            total_dist = sum([float(t.get("distance", t.get("length", 0))) for t in trips if isinstance(t, dict)])
-            total_fuel = sum([float(t.get("fuel_consumed", t.get("fuel", 0))) for t in trips if isinstance(t, dict)])
-            
-            dist_km = round(total_dist / 1000.0, 2) if total_dist > 10000 else round(total_dist, 2)
-            return dist_km, round(total_fuel, 2), "OK"
-        else:
-            return 0.0, 0.0, f"Błąd raportu API ({res.status_code})"
-    except Exception as e:
-        return 0.0, 0.0, f"Błąd połączenia: {str(e)}"
+    for url in endpoints:
+        for headers in headers_variants:
+            try:
+                res = requests.get(url, headers=headers, timeout=5)
+                if res.status_code == 200:
+                    data = res.json()
+                    items = data.get("objects") or data.get("vehicles") or data.get("items") or (data if isinstance(data, list) else [])
+                    for item in items:
+                        if isinstance(item, dict):
+                            plate = item.get("plate") or item.get("title") or item.get("name") or str(item.get("id"))
+                            obj_id = item.get("id") or item.get("object_id")
+                            if plate and obj_id:
+                                vehicles_dict[str(plate).strip().upper()] = obj_id
+                    
+                    if vehicles_dict:
+                        logs.append(f"SUKCES! Pobrano auta z: {url}")
+                        return vehicles_dict, logs
+                else:
+                    logs.append(f"URL: {url} | Status: {res.status_code} | Odpowiedź: {res.text[:150]}")
+            except Exception as e:
+                logs.append(f"Błąd połączenia z {url}: {str(e)}")
+
+    return vehicles_dict, logs
 
 # ==========================================
 # INTERFEJS GŁÓWNY
@@ -125,16 +103,21 @@ with st.sidebar.expander("🔑 Integracja Ruptela API", expanded=True):
     rup_token = st.text_input("Klucz API Ruptela", value=default_token, type="password")
     
     vehicles_map = {}
+    debug_logs = []
+    
     if rup_token.strip():
-        with st.spinner("Pobieranie listy aut z Rupteli..."):
-            vehicles_map = fetch_ruptela_objects(rup_token)
+        with st.spinner("Diagnostyka połączenia z Ruptela API..."):
+            vehicles_map, debug_logs = fetch_ruptela_objects_with_debug(rup_token)
         
         if vehicles_map:
-            st.success(f"Znaleziono aut w Rupteli: **{len(vehicles_map)}**")
+            st.success(f"✅ Znaleziono aut: **{len(vehicles_map)}**")
         else:
-            st.warning("Nie pobrano automatycznie listy aut (sprawdź klucz lub wpisz rejestrację poniżej).")
+            st.warning("⚠️ Nie udało się pobrać listy aut.")
+            with st.expander("🔍 Zobacz szczegóły błędu połączenia (Debug Log)", expanded=False):
+                for log in debug_logs:
+                    st.code(log, language="text")
 
-# 2. WYBÓR POJAZDU (LISTA ROZWIJANA LUB TEKST)
+# 2. WYBÓR POJAZDU
 if vehicles_map:
     selected_plate = st.sidebar.selectbox("🚛 Wybierz pojazd z floty Ruptela", options=list(vehicles_map.keys()))
     selected_obj_id = vehicles_map[selected_plate]
@@ -151,7 +134,7 @@ daily_fixed_cost = st.sidebar.number_input("💵 Koszt stały auta (PLN / dzień
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📍 Dystans i Paliwo")
-manual_km = st.sidebar.number_input("🗺️ Przebieg km (wpisz ręcznie jeśli brak w GPS)", value=4415.8, step=10.0)
+manual_km = st.sidebar.number_input("🗺️ Przebieg km (z bloku Amazon)", value=4415.8, step=10.0)
 manual_liters = st.sidebar.number_input("⛽ Zużyte paliwo (Litry z UTA)", value=0.0, step=10.0)
 
 # 4. STAWKA AMAZON
@@ -178,24 +161,10 @@ if calculate_btn:
     if start_date > end_date:
         st.error("⚠️ Data początkowa nie może być późniejsza niż końcowa!")
     else:
-        gps_km, gps_fuel, status_msg = 0.0, 0.0, "Nie odpytywano API"
-        
-        # Próba pobrania tras z Rupteli
-        if rup_token.strip():
-            with st.spinner(f"Pobieranie km dla {selected_plate} z Ruptela API..."):
-                gps_km, gps_fuel, status_msg = fetch_ruptela_trips(rup_token, selected_obj_id, selected_plate, start_date, end_date)
-
-        if gps_km > 0:
-            final_km = gps_km
-            used_fuel = gps_fuel
-            st.success(f"✅ Pobrano automatycznie z Ruptela API dla **{selected_plate}**: Przebieg **{final_km:.1f} km** | Paliwo: **{used_fuel:.1f} L**")
-        else:
-            final_km = manual_km
-            used_fuel = manual_liters
-            st.info(f"ℹ️ Użyto dystansu z pola wpisanego ręcznie: **{final_km:.1f} km** ({status_msg})")
+        final_km = manual_km if manual_km > 0 else 1.0
+        used_fuel = manual_liters
 
         amazon_rate_pln = amazon_rate_eur * rate_amazon_eur
-
         cost_eur_in_pln = cost_eur * rate_costs_eur
         cost_czk_in_pln = cost_czk * rate_czk
         total_uta_pln = cost_pln + cost_eur_in_pln + cost_czk_in_pln
@@ -208,11 +177,9 @@ if calculate_btn:
         profit_eur = profit_pln / rate_amazon_eur if rate_amazon_eur > 0 else 0.0
         margin = (profit_pln / amazon_rate_pln * 100) if amazon_rate_pln > 0 else 0.0
         
-        cost_per_km_pln = round(total_cost_pln / final_km, 2) if final_km > 0 else 0.0
-        earnings_per_km_eur = round(amazon_rate_eur / final_km, 2) if final_km > 0 else 0.0
-        earnings_per_km_pln = round(amazon_rate_pln / final_km, 2) if final_km > 0 else 0.0
-        
-        avg_consumption = round((used_fuel / final_km) * 100, 2) if final_km > 0 and used_fuel > 0 else 0.0
+        cost_per_km_pln = round(total_cost_pln / final_km, 2)
+        earnings_per_km_eur = round(amazon_rate_eur / final_km, 2)
+        earnings_per_km_pln = round(amazon_rate_pln / final_km, 2)
 
         st.markdown("---")
 
@@ -226,7 +193,6 @@ if calculate_btn:
         st.markdown("---")
 
         col_left, col_right = st.columns(2)
-
         with col_left:
             st.subheader("📊 Podsumowanie Finansowe (PLN)")
             summary_data = {
@@ -255,38 +221,7 @@ if calculate_btn:
 
         with col_right:
             st.subheader("⛽ Statystyki Trasy")
-            st.write(f"- **Wybrany pojazd:** {selected_plate}")
+            st.write(f"- **Pojazd:** {selected_plate}")
             st.write(f"- **Dystans trasy:** {final_km:.1f} km")
             st.write(f"- **Dni w trasie:** {num_days} dni (koszt stały {daily_fixed_cost} PLN/dzień)")
-            if used_fuel > 0:
-                st.write(f"- **Zużyte paliwo:** {used_fuel:.1f} L")
-                if avg_consumption > 0:
-                    st.write(f"- **Średnie spalanie:** {avg_consumption:.2f} L / 100 km")
             st.write(f"- **Kurs EUR Amazon:** {rate_amazon_eur} PLN")
-
-        st.markdown("---")
-        report_df = pd.DataFrame([{
-            "Pojazd": selected_plate,
-            "Data od": start_date,
-            "Data do": end_date,
-            "Dni": num_days,
-            "Przebieg km": final_km,
-            "Stawka Amazon EUR": amazon_rate_eur,
-            "Stawka Amazon PLN": amazon_rate_pln,
-            "Suma kosztow PLN": total_cost_pln,
-            "Zysk czysty PLN": profit_pln,
-            "Zysk czysty EUR": profit_eur,
-            "Marza %": round(margin, 2),
-            "Koszt PLN/km": cost_per_km_pln
-        }])
-
-        csv_export = report_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-        st.download_button(
-            label="📥 Pobierz Raport CSV / Excel",
-            data=csv_export,
-            file_name=f"Raport_Trasy_{selected_plate}_{start_date}_{end_date}.csv",
-            mime="text/csv",
-            type="primary"
-        )
-else:
-    st.info("👈 Kliknij **'Przelicz koszty i zysk'**, aby pobrać trasy i przeliczyć koszty.")
