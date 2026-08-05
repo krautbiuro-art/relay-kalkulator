@@ -39,70 +39,54 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# MODUŁ AUTOBIERANIA DANYCH Z RUPTELI
+# MODUŁ POBIERANIA Z API RUPTELA
 # ==========================================
-def fetch_ruptela_data(username, password, plate, start_date, end_date):
-    """Pobiera przebieg i paliwo bezpośrednio z track2.ruptela.com"""
-    if not username or not password:
-        return 0.0, 0.0, "Brak wpisanych danych logowania Ruptela"
+def fetch_ruptela_data_v2(api_token, plate, start_date, end_date):
+    """Pobiera dane jeśli podano Klucz API Token"""
+    if not api_token:
+        return 0.0, 0.0, "Brak klucza API"
 
     clean_plate = plate.replace(" ", "").upper()
-    session = requests.Session()
+    headers = {
+        "Authorization": f"Bearer {api_token.strip()}",
+        "Accept": "application/json"
+    }
     
-    # 1. Logowanie i pobranie tokenu
-    login_url = "https://track2.ruptela.com/api/v1/auth/login"
-    payload = {"username": username, "password": password}
+    # Próba pobrania tras
+    url = f"https://track2.ruptela.com/api/v1/reports/trips"
+    params = {
+        "plate": clean_plate,
+        "from": f"{start_date}T00:00:00Z",
+        "to": f"{end_date}T23:59:59Z"
+    }
     
     try:
-        res = session.post(login_url, json=payload, timeout=8)
-        if res.status_code != 200:
-            return 0.0, 0.0, f"Błąd logowania Ruptela (Kod: {res.status_code})"
-        
-        token = res.json().get("token") or res.json().get("access_token")
-        if not token:
-            return 0.0, 0.0, "Nie otrzymano tokenu autoryzacji"
-
-        # 2. Pobieranie raportu tras
-        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        report_url = "https://track2.ruptela.com/api/v1/reports/trips"
-        params = {
-            "plate": clean_plate,
-            "from": f"{start_date}T00:00:00Z",
-            "to": f"{end_date}T23:59:59Z"
-        }
-        
-        rep_res = session.get(report_url, headers=headers, params=params, timeout=10)
-        if rep_res.status_code == 200:
-            data = rep_res.json()
+        res = requests.get(url, headers=headers, params=params, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
             trips = data.get("trips") or data.get("items") or (data if isinstance(data, list) else [])
-            
             if trips:
                 total_dist = sum([float(t.get("distance", t.get("length", 0))) for t in trips if isinstance(t, dict)])
                 total_fuel = sum([float(t.get("fuel_consumed", t.get("fuel", 0))) for t in trips if isinstance(t, dict)])
-                
                 dist_km = round(total_dist / 1000.0, 2) if total_dist > 10000 else round(total_dist, 2)
                 return dist_km, round(total_fuel, 2), "OK"
-            else:
-                return 0.0, 0.0, f"Brak zarejestrowanych tras w podanym okresie dla {clean_plate}"
+            return 0.0, 0.0, "Brak tras"
         else:
-            return 0.0, 0.0, f"Błąd raportu z Rupteli ({rep_res.status_code})"
-            
+            return 0.0, 0.0, f"Błąd API ({res.status_code})"
     except Exception as e:
-        return 0.0, 0.0, f"Błąd połączenia: {str(e)}"
+        return 0.0, 0.0, "Błąd połączenia"
 
 # ==========================================
 # INTERFEJS GŁÓWNY
 # ==========================================
 st.title("🚚 Kalkulator Kosztów i Zysku Tras")
-st.caption("Automatyczne rozliczanie tras (Pobieranie danych z Rupteli + Koszty UTA + Stawka Amazon)")
+st.caption("Rozliczanie tras Amazon + UTA + Ruptela GPS")
 
 st.sidebar.header("⚙️ Ustawienia i dane trasy")
 
-# RUPTELA CREDENTIALS
-with st.sidebar.expander("🔑 Logowanie Track2 Ruptela (API)", expanded=True):
-    rup_user = st.text_input("Login Ruptela", value="KrautRup99", help="Login do track2.ruptela.com")
-    rup_pass = st.text_input("Hasło Ruptela", type="password", value="", help="Hasło do track2.ruptela.com")
-    use_ruptela = st.checkbox("Zaciągaj dane z Ruptela GPS", value=True)
+# METODA INTEGRACJI
+with st.sidebar.expander("🔑 Integracja Ruptela API (Opcjonalnie)", expanded=False):
+    rup_token = st.text_input("Klucz API / Token Ruptela", value="", type="password", help="Wklej token z panelu Ruptela, jeśli chcesz automatycznie zaciągać km.")
 
 vehicle_plate = st.sidebar.text_input("🚛 Numer rejestracyjny pojazdu", value="KN0782G").strip().upper()
 
@@ -113,19 +97,19 @@ end_date = col_d2.date_input("Data do", value=date.today())
 daily_fixed_cost = st.sidebar.number_input("💵 Koszt stały auta (PLN / dzień)", value=1140.0, step=10.0)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📍 Dystans i Paliwo (Wpisz ręcznie jeśli brak GPS)")
-manual_km = st.sidebar.number_input("🗺️ Przebieg km", value=4415.8, step=10.0)
-manual_liters = st.sidebar.number_input("⛽ Zużyte paliwo (Litry)", value=0.0, step=10.0)
+st.sidebar.subheader("📍 Dystans i Paliwo")
+manual_km = st.sidebar.number_input("🗺️ Przebieg km (z bloku Amazon)", value=4415.8, step=10.0)
+manual_liters = st.sidebar.number_input("⛽ Zużyte paliwo (Litry z UTA)", value=0.0, step=10.0)
 
 # ==========================================
-# STAWKA AMAZON W EUR
+# STAWKA AMAZON
 # ==========================================
 with st.sidebar.expander("📦 Stawka za Blok Amazon (€)", expanded=True):
     amazon_rate_eur = st.number_input("Stawka za blok w EUR (€)", value=4942.40, step=100.0)
     rate_amazon_eur = st.number_input("Kurs EUR dla stawki (EUR -> PLN)", value=4.31, step=0.01)
 
 # ==========================================
-# FORMULARZ KOSZTÓW UTA
+# WYDATKI UTA
 # ==========================================
 with st.sidebar.expander("💳 Wydatki z UTA / Drogowe", expanded=False):
     cost_pln = st.number_input("Kwota w PLN", value=0.0, step=50.0)
@@ -136,7 +120,7 @@ with st.sidebar.expander("💳 Wydatki z UTA / Drogowe", expanded=False):
     rate_costs_eur = st.number_input("Kurs EUR do kosztów -> PLN", value=4.30, step=0.01)
     rate_czk = st.number_input("Kurs CZK -> PLN", value=0.17, step=0.01)
 
-calculate_btn = st.sidebar.button("🚀 Zaciągnij dane i Przelicz", type="primary", use_container_width=True)
+calculate_btn = st.sidebar.button("🚀 Przelicz koszty i zysk", type="primary", use_container_width=True)
 
 if calculate_btn:
     if start_date > end_date:
@@ -144,22 +128,19 @@ if calculate_btn:
     else:
         gps_km, gps_fuel, status_msg = 0.0, 0.0, "Tryb ręczny"
         
-        # Próba zaciągnięcia danych z Ruptela API
-        if use_ruptela:
-            with st.spinner("Łączenie z track2.ruptela.com i pobieranie danych GPS..."):
-                gps_km, gps_fuel, status_msg = fetch_ruptela_data(rup_user, rup_pass, vehicle_plate, start_date, end_date)
+        # Jeśli wklejono Token API, próbujemy pobrać dane z Rupteli
+        if rup_token.strip():
+            with st.spinner("Pobieranie danych z API Ruptela..."):
+                gps_km, gps_fuel, status_msg = fetch_ruptela_data_v2(rup_token, vehicle_plate, start_date, end_date)
 
-        # Ustalenie ostatecznych wartości kilometrów i paliwa
         if gps_km > 0:
             final_km = gps_km
             used_fuel = gps_fuel
-            data_source = "✅ Pobrano automatycznie z Ruptela GPS"
-            st.success(f"{data_source}: **{final_km:.1f} km** | Paliwo: **{used_fuel:.1f} L**")
+            st.success(f"✅ Pobrano z Ruptela API: **{final_km:.1f} km** | Paliwo: **{used_fuel:.1f} L**")
         else:
-            final_km = manual_km if manual_km > 0 else 1000.0
+            final_km = manual_km
             used_fuel = manual_liters
-            data_source = f"ℹ️ Dane wpisane ręcznie ({status_msg})"
-            st.info(f"{data_source} | Dystans: **{final_km:.1f} km**")
+            st.info(f"ℹ️ Użyto dystansu z pola wpisanego ręcznie: **{final_km:.1f} km**")
 
         amazon_rate_pln = amazon_rate_eur * rate_amazon_eur
 
@@ -221,9 +202,8 @@ if calculate_btn:
             st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
 
         with col_right:
-            st.subheader("⛽ Statystyki Trasy i Źródło")
+            st.subheader("⛽ Statystyki Trasy")
             st.write(f"- **Pojazd:** {vehicle_plate}")
-            st.write(f"- **Źródło przebiegu:** {data_source}")
             st.write(f"- **Dystans trasy:** {final_km:.1f} km")
             st.write(f"- **Dni w trasie:** {num_days} dni (koszt stały {daily_fixed_cost} PLN/dzień)")
             if used_fuel > 0:
@@ -257,4 +237,4 @@ if calculate_btn:
             type="primary"
         )
 else:
-    st.info("👈 Uzupełnij hasło Ruptela i kliknij **'Zaciągnij dane i Przelicz'**.")
+    st.info("👈 Wpisz przebieg i stawkę, a następnie kliknij **'Przelicz koszty i zysk'**.")
