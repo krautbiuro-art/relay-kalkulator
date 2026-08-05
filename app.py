@@ -25,7 +25,7 @@ def check_password():
         return True
 
     st.title("🔐 Logowanie do Kalkulatora Floty")
-    st.caption("Aplikacja do rozliczania tras (Ruptela + UTA)")
+    st.caption("Aplikacja do rozliczania tras (Ruptela + UTA + Amazon)")
     
     password = st.text_input("Wpisz hasło dostępu:", type="password")
     
@@ -91,10 +91,11 @@ daily_fixed_cost = st.sidebar.number_input("💵 Koszt stały auta (PLN / dzień
 manual_km = st.sidebar.number_input("🗺️ Przebieg km (jeśli brak połączenia API)", value=0.0, step=50.0)
 
 # ==========================================
-# STAWKA AMAZON / PRZYCHÓD
+# STAWKA AMAZON W EUR
 # ==========================================
-with st.sidebar.expander("📦 Stawka za Blok Amazon", expanded=True):
-    amazon_rate = st.number_input("Przychód / Stawka za blok (PLN)", value=12000.0, step=500.0, help="Łączny fracht / przychód za zrealizowany blok Amazon")
+with st.sidebar.expander("📦 Stawka za Blok Amazon (€)", expanded=True):
+    amazon_rate_eur = st.number_input("Stawka za blok w EUR (€)", value=2800.0, step=100.0, help="Fracht EUR za blok Amazon")
+    rate_amazon_eur = st.number_input("Kurs EUR dla stawki (EUR -> PLN)", value=4.25, step=0.01)
 
 # ==========================================
 # FORMULARZ KOSZTÓW UTA
@@ -106,8 +107,8 @@ with st.sidebar.expander("💳 Wydatki z UTA (Ręcznie)", expanded=False):
     cost_czk = st.number_input("Kwota w CZK (KORONY)", value=0.0, step=100.0)
     
     st.markdown("---")
-    st.markdown("**Kursy walut (do przeliczenia na PLN):**")
-    rate_eur = st.number_input("Kurs EUR -> PLN", value=4.30, step=0.01)
+    st.markdown("**Kursy walut dla kosztów:**")
+    rate_costs_eur = st.number_input("Kurs EUR do kosztów -> PLN", value=4.30, step=0.01)
     rate_czk = st.number_input("Kurs CZK -> PLN", value=0.17, step=0.01)
     
     st.markdown("---")
@@ -126,32 +127,37 @@ if calculate_btn:
             
             final_km = km_gps if km_gps > 0 else (manual_km if manual_km > 0 else 1000.0)
 
-            # Obliczenia finansowe
-            cost_eur_in_pln = cost_eur * rate_eur
+            # Obliczenia przychodu (Amazon w EUR na PLN)
+            amazon_rate_pln = amazon_rate_eur * rate_amazon_eur
+
+            # Obliczenia kosztów w PLN
+            cost_eur_in_pln = cost_eur * rate_costs_eur
             cost_czk_in_pln = cost_czk * rate_czk
             total_uta_pln = cost_pln + cost_eur_in_pln + cost_czk_in_pln
 
             num_days = (end_date - start_date).days + 1
             total_fixed = num_days * daily_fixed_cost
-            total_cost = total_fixed + total_uta_pln
+            total_cost_pln = total_fixed + total_uta_pln
             
-            # Wynik finansowy (Zysk / Straty)
-            profit = amazon_rate - total_cost
-            margin = (profit / amazon_rate * 100) if amazon_rate > 0 else 0.0
+            # Wynik finansowy
+            profit_pln = amazon_rate_pln - total_cost_pln
+            profit_eur = profit_pln / rate_amazon_eur if rate_amazon_eur > 0 else 0.0
+            margin = (profit_pln / amazon_rate_pln * 100) if amazon_rate_pln > 0 else 0.0
             
-            cost_per_km = round(total_cost / final_km, 2) if final_km > 0 else 0.0
-            earnings_per_km = round(amazon_rate / final_km, 2) if final_km > 0 else 0.0
+            cost_per_km_pln = round(total_cost_pln / final_km, 2) if final_km > 0 else 0.0
+            earnings_per_km_eur = round(amazon_rate_eur / final_km, 2) if final_km > 0 else 0.0
+            earnings_per_km_pln = round(amazon_rate_pln / final_km, 2) if final_km > 0 else 0.0
             avg_consumption = round((total_liters / final_km) * 100, 2) if final_km > 0 else 0.0
 
             # Prezentacja wyników
             st.success(f"Rozliczono pojazd **{vehicle_plate}** za okres **{start_date}** do **{end_date}** ({num_days} dni).")
 
             m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Stawka Amazon", f"{amazon_rate:.2f} PLN")
-            m2.metric("Łączne Koszty", f"{total_cost:.2f} PLN")
-            m3.metric("ZYSK CZYSTY", f"{profit:.2f} PLN", delta=f"{margin:.1f}% Marży")
-            m4.metric("Stawka / km", f"{earnings_per_km:.2f} PLN/km")
-            m5.metric("Koszt / km", f"{cost_per_km:.2f} PLN/km")
+            m1.metric("Stawka Amazon", f"{amazon_rate_eur:.2f} €", delta=f"{amazon_rate_pln:.2f} PLN")
+            m2.metric("Łączne Koszty", f"{total_cost_pln:.2f} PLN")
+            m3.metric("CZYSTY ZYSK", f"{profit_pln:.2f} PLN", delta=f"{profit_eur:.2f} € ({margin:.1f}%)")
+            m4.metric("Stawka / km", f"{earnings_per_km_eur:.2f} €/km", delta=f"{earnings_per_km_pln:.2f} PLN/km")
+            m5.metric("Koszt / km", f"{cost_per_km_pln:.2f} PLN/km")
 
             st.markdown("---")
 
@@ -161,22 +167,24 @@ if calculate_btn:
                 st.subheader("📊 Podsumowanie Finansowe (PLN)")
                 summary_data = {
                     "Kategoria": [
-                        "Stawka Amazon (Przychód)",
+                        f"Stawka Amazon ({amazon_rate_eur:.2f} € @ {rate_amazon_eur} PLN)",
                         "Wydatki UTA w PLN", 
                         f"Wydatki UTA w EUR ({cost_eur:.2f} €)", 
                         f"Wydatki UTA w CZK ({cost_czk:.2f} CZK)", 
                         "Koszty stałe auta", 
                         "SUMA KOSZTÓW",
-                        "CZYSTY ZYSK"
+                        "CZYSTY ZYSK (PLN)",
+                        "CZYSTY ZYSK (EUR)"
                     ],
-                    "Kwota (PLN)": [
-                        round(amazon_rate, 2),
-                        round(cost_pln, 2), 
-                        round(cost_eur_in_pln, 2), 
-                        round(cost_czk_in_pln, 2), 
-                        round(total_fixed, 2), 
-                        round(total_cost, 2),
-                        round(profit, 2)
+                    "Kwota": [
+                        f"{amazon_rate_pln:.2f} PLN",
+                        f"{cost_pln:.2f} PLN", 
+                        f"{cost_eur_in_pln:.2f} PLN", 
+                        f"{cost_czk_in_pln:.2f} PLN", 
+                        f"{total_fixed:.2f} PLN", 
+                        f"{total_cost_pln:.2f} PLN",
+                        f"{profit_pln:.2f} PLN",
+                        f"{profit_eur:.2f} €"
                     ],
                 }
                 st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
@@ -187,7 +195,8 @@ if calculate_btn:
                 st.write(f"- **Dni w trasie:** {num_days} dni (koszt stały {daily_fixed_cost} PLN/dzień)")
                 st.write(f"- **Wpisane litry paliwa:** {total_liters} L")
                 st.write(f"- **Wyliczone spalanie:** {avg_consumption} L / 100 km")
-                st.write(f"- **Kursy:** EUR = {rate_eur} PLN | CZK = {rate_czk} PLN")
+                st.write(f"- **Kurs EUR Amazon:** {rate_amazon_eur} PLN")
+                st.write(f"- **Kurs EUR Koszty:** {rate_costs_eur} PLN")
 
             st.markdown("---")
             report_df = pd.DataFrame([{
@@ -196,7 +205,9 @@ if calculate_btn:
                 "Data do": end_date,
                 "Dni": num_days,
                 "Przebieg km": final_km,
-                "Stawka Amazon PLN": amazon_rate,
+                "Stawka Amazon EUR": amazon_rate_eur,
+                "Kurs EUR Amazon": rate_amazon_eur,
+                "Stawka Amazon PLN": amazon_rate_pln,
                 "Wydatki PLN": cost_pln,
                 "Wydatki EUR (€)": cost_eur,
                 "Wydatki CZK": cost_czk,
@@ -204,11 +215,12 @@ if calculate_btn:
                 "Litry L": total_liters,
                 "Spalanie L/100km": avg_consumption,
                 "Koszty stale PLN": total_fixed,
-                "Suma kosztow PLN": total_cost,
-                "Zysk czysty PLN": profit,
+                "Suma kosztow PLN": total_cost_pln,
+                "Zysk czysty PLN": profit_pln,
+                "Zysk czysty EUR": profit_eur,
                 "Marza %": round(margin, 2),
-                "Koszt PLN/km": cost_per_km,
-                "Stawka PLN/km": earnings_per_km
+                "Koszt PLN/km": cost_per_km_pln,
+                "Stawka EUR/km": earnings_per_km_eur
             }])
 
             csv_export = report_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
