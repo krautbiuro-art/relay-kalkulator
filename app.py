@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
 import requests
+import json
 from typing import Dict, Any, Tuple
 
 # ==========================================
@@ -40,66 +41,92 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# 1. MODUŁ RUPTELA API
+# 1. MODUŁ RUPTELA API (BEZPIECZNY DEBUGER RESPONSÓW)
 # ==========================================
 class RuptelaAPI:
     def __init__(self, api_key: str, base_host: str):
-        self.base_url = f"{base_host.rstrip('/')}/v1"
+        self.base_host = base_host.rstrip('/')
         self.api_key = api_key.strip()
 
     def get_vehicle_data(self, vehicle_plate: str, start_date: date, end_date: date) -> Tuple[float, float, str]:
-        """
-        Pobiera Dystans (km) oraz Zużyte Paliwo (L) z Rupteli.
-        """
         if not self.api_key:
-            return 0.0, 0.0, "Brak wpisanego klucza API."
+            return 0.0, 0.0, "Nie wpisano klucza API Ruptela."
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "X-API-KEY": self.api_key,
-            "Accept": "application/json"
-        }
-        
-        # Endpointy w systemie Ruptela / TrustTrack
-        endpoint = f"{self.base_url}/reports/trips"
+        # Przygotowanie różnych wariantów URL i nagłówków stosowanych przez Ruptelę
+        endpoints_to_try = [
+            f"{self.base_host}/v1/reports/trips",
+            f"{self.base_host}/reports/trips",
+            f"{self.base_host}/v1/devices"
+        ]
+
+        clean_plate = vehicle_plate.replace(" ", "").upper()
         params = {
-            "plate_number": vehicle_plate.replace(" ", ""),
-            "plate": vehicle_plate.replace(" ", ""),
+            "plate_number": clean_plate,
+            "plate": clean_plate,
             "from": f"{start_date}T00:00:00Z",
-            "to": f"{end_date}T23:59:59Z"
+            "to": f"{end_date}T23:59:59Z",
+            "api_key": self.api_key
         }
-        
-        try:
-            response = requests.get(endpoint, headers=headers, params=params, timeout=20)
-            
-            if response.status_code == 200:
-                data = response.json()
-                trips = data.get("trips", []) or data.get("items", []) or (data if isinstance(data, list) else [])
-                
-                if not trips:
-                    return 0.0, 0.0, f"Połączono z API, ale brak tras dla rejestracji '{vehicle_plate}' w wybranym okresie."
 
-                total_distance_m = 0.0
-                total_fuel_l = 0.0
+        headers_variants = [
+            {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"},
+            {"X-API-KEY": self.api_key, "Accept": "application/json"},
+            {"Accept": "application/json"}
+        ]
 
-                for trip in trips:
-                    total_distance_m += float(trip.get("distance", trip.get("length", 0)))
-                    total_fuel_l += float(trip.get("fuel_consumed", trip.get("fuel", 0)))
+        last_error = ""
 
-                dist_km = round(total_distance_m / 1000.0, 2) if total_distance_m > 10000 else round(total_distance_m, 2)
-                fuel_l = round(total_fuel_l, 2)
-                
-                return dist_km, fuel_l, "OK"
+        # Testowanie połączeń po kolei
+        for url in endpoints_to_try:
+            for headers in headers_variants:
+                try:
+                    res = requests.get(url, headers=headers, params=params, timeout=10)
+                    
+                    # Jeśli odpowiedź nie jest JSON-em (np. HTML z błędem serwera)
+                    if "application/json" not in res.headers.get("Content-Type", ""):
+                        last_error = f"Serwer returned non-JSON response ({res.status_code}). Treść: {res.text[:120]}"
+                        continue
 
-            elif response.status_code in (401, 403):
-                return 0.0, 0.0, "Błąd autoryzacji (401/403): Nieprawidłowy Klucz API."
-            else:
-                return 0.0, 0.0, f"Serwer odpowiedział kodem: {response.status_code}. Treść: {response.text[:100]}"
+                    if res.status_code == 200:
+                        data = res.json()
+                        
+                        # Szukanie obiektów tras / dystansu w strukturze JSON
+                        trips = []
+                        if isinstance(data, list):
+                            trips = data
+                        elif isinstance(data, dict):
+                            trips = data.get("trips") or data.get("items") or data.get("data") or []
 
-        except requests.exceptions.Timeout:
-            return 0.0, 0.0, "Przekroczono czas oczekiwania (Timeout). Sprawdź wybrany serwer API Ruptela."
-        except Exception as e:
-            return 0.0, 0.0, f"Błąd połączenia: {e}"
+                        if not trips and isinstance(data, dict):
+                            # Jeśli to endpoint listujący pojazdy / devices
+                            devices = data.get("devices") or data.get("items") or []
+                            for dev in devices:
+                                if dev.get("plate_number") == clean_plate or dev.get("plate") == clean_plate:
+                                    last_error = f"Znaleziono pojazd ID {dev.get('id')}, ale brak wygenerowanego raportu tras."
+
+                        total_dist_m = 0.0
+                        total_fuel_l = 0.0
+
+                        for t in trips:
+                            if isinstance(t, dict):
+                                total_dist_m += float(t.get("distance", t.get("length", 0)))
+                                total_fuel_l += float(t.get("fuel_consumed", t.get("fuel", 0)))
+
+                        dist_km = round(total_dist_m / 1000.0, 2) if total_dist_m > 10000 else round(total_dist_m, 2)
+                        fuel_l = round(total_fuel_l, 2)
+
+                        if dist_km > 0:
+                            return dist_km, fuel_l, "OK"
+                        
+                    elif res.status_code in (401, 403):
+                        last_error = f"Błąd autoryzacji ({res.status_code}): Sprawdź poprawność klucza API."
+                    else:
+                        last_error = f"Kod odpowiedzi {res.status_code} z endpointu {url}"
+
+                except Exception as e:
+                    last_error = f"Wyjątek sieciowy: {str(e)}"
+
+        return 0.0, 0.0, last_error if last_error else "Nie udało się pobrać danych z API Ruptela."
 
 # ==========================================
 # INTERFEJS GŁÓWNY
@@ -114,9 +141,13 @@ with st.sidebar.expander("🔑 Ustawienia Ruptela API", expanded=True):
     ruptela_api_key = st.text_input("Podaj Klucz API (API Key)", type="password", value="", help="Wklej klucz API Ruptela")
     server_url = st.selectbox(
         "Serwer Ruptela API", 
-        ["https://track2.ruptela.com/api", "https://api.ruptela.com", "https://trusttrack.ruptela.com/api"],
-        index=0,
-        help="Jeśli główny serwer daje timeout, zmień na wyższy z listy."
+        [
+            "https://track2.ruptela.com/api", 
+            "https://trusttrack.ruptela.com/api",
+            "https://api.ruptela.com",
+            "https://fm-api.ruptela.com"
+        ],
+        index=0
     )
 
 vehicle_plate = st.sidebar.text_input("🚛 Numer rejestracyjny pojazdu", value="KN0782G").strip().upper()
@@ -163,10 +194,10 @@ if calculate_btn:
             # Weryfikacja dystansu
             if km_gps > 0:
                 final_km = km_gps
-                st.success(f"✅ Pobrano z Ruptela API: **{km_gps:.1f} km**")
+                st.success(f"✅ Pobrano z Ruptela API: **{km_gps:.1f} km** | Paliwo: **{fuel_ruptela_l:.1f} L**")
             else:
                 final_km = manual_km if manual_km > 0 else 1000.0
-                st.warning(f"⚠️ **Powiadomienie Ruptela API:** {api_status}")
+                st.warning(f"⚠️ **Diagnoza Ruptela API:** {api_status}")
                 if manual_km > 0:
                     st.info(f"Użyto dystansu wpisanego ręcznie: **{manual_km:.1f} km**.")
 
