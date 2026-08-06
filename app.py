@@ -29,9 +29,9 @@ def get_vehicles_list(api_key):
     except Exception:
         return []
 
-# --- 2. POBIERANIE TRAS DLA WYBRANEGO POJAZDU I DAT ---
-def get_vehicle_trips(api_key, vehicle_id, dt_from, dt_to):
-    # Korekta czasu UTC+2 (czas letni w PL)
+# --- 2. POBIERANIE PODSUMOWANIA (MILEAGE + FUEL CAN) Z RUPTELA ---
+def get_vehicle_stats(api_key, vehicle_id, dt_from, dt_to):
+    # Korekta strefy czasowej na UTC
     tz_offset = timedelta(hours=2)
     dt_from_utc = dt_from - tz_offset
     dt_to_utc = dt_to - tz_offset
@@ -39,10 +39,11 @@ def get_vehicle_trips(api_key, vehicle_id, dt_from, dt_to):
     from_str = dt_from_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     to_str = dt_to_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     
-    url = f"https://api.fm-track.com/objects/{vehicle_id}/trips?version=1&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
+    # 1. Pobranie podsumowania z endpointu /summary lub /trips z zapasem
+    url_trips = f"https://api.fm-track.com/objects/{vehicle_id}/trips?version=1&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
     
     try:
-        resp = requests.get(url, timeout=15)
+        resp = requests.get(url_trips, timeout=15)
         if resp.status_code == 200:
             res_data = resp.json()
             trips_list = res_data.get("trips", []) if isinstance(res_data, dict) else []
@@ -50,22 +51,24 @@ def get_vehicle_trips(api_key, vehicle_id, dt_from, dt_to):
             if not trips_list:
                 return 0.0, 0.0
             
-            total_distance_m = 0.0
-            total_fuel_can = 0.0
-            has_can_fuel = False
+            # Wyciągamy dystans z odometru: stan końcowy - stan początkowy
+            start_odo = trips_list[0].get("start_odometer", trips_list[0].get("odometer", 0))
+            end_odo = trips_list[-1].get("end_odometer", trips_list[-1].get("odometer", 0))
             
-            for trip in trips_list:
-                dist_m = trip.get("mileage", 0.0)
-                if dist_m:
-                    total_distance_m += float(dist_m)
+            total_distance_km = 0.0
+            if end_odo > start_odo and start_odo > 0:
+                total_distance_km = (end_odo - start_odo) / 1000.0
+            else:
+                # Fallback: sumowanie mileage jeśli brak odometru
+                total_distance_km = sum(float(t.get("mileage", 0.0)) for t in trips_list) / 1000.0
                 
-                fuel = trip.get("fuel_consumed", trip.get("fuel", trip.get("fuel_used", None)))
-                if fuel is not None:
-                    total_fuel_can += float(fuel)
-                    has_can_fuel = True
+            # Zużycie paliwa z magistrali CAN
+            total_fuel_can = sum(
+                float(t.get("fuel_consumed", t.get("fuel", t.get("fuel_used", 0.0)) or 0.0))
+                for t in trips_list
+            )
             
-            total_distance_km = total_distance_m / 1000.0
-            return total_distance_km, (total_fuel_can if has_can_fuel else 0.0)
+            return total_distance_km, total_fuel_can
         return 0.0, 0.0
     except Exception:
         return 0.0, 0.0
@@ -105,7 +108,7 @@ dt_do = datetime.combine(data_do, godz_do)
 st.sidebar.divider()
 st.sidebar.header("⚙️ Parametry kosztowe")
 cena_paliwa = st.sidebar.number_input("Cena ON za litr (PLN netto):", value=6.20, step=0.05, format="%.2f")
-srednia_norma = st.sidebar.number_input("Domyślna norma spalania (L/100km):", value=18.0, step=0.5)
+srednia_norma = st.sidebar.number_input("Domyślna norma spalania (L/100km):", value=21.33, step=0.5)
 oplaty_drogowe = st.sidebar.number_input("Dodatkowe koszty / e-TOLL (PLN):", value=0.0, step=50.0)
 
 # --- PRZETWARZANIE DANYCH ---
@@ -116,7 +119,7 @@ with st.spinner("Pobieranie danych z Ruptela API..."):
         for v in vehicles:
             v_id = v.get("id")
             v_name = v.get("name", "Pojazd")
-            dystans, spalanie = get_vehicle_trips(API_KEY, v_id, dt_od, dt_do)
+            dystans, spalanie = get_vehicle_stats(API_KEY, v_id, dt_od, dt_do)
             
             if spalanie == 0.0 and dystans > 0:
                 spalanie = (dystans / 100.0) * srednia_norma
@@ -127,7 +130,7 @@ with st.spinner("Pobieranie danych z Ruptela API..."):
                 "Spalanie_L": spalanie
             })
     else:
-        dystans, spalanie = get_vehicle_trips(API_KEY, wybrany_id, dt_od, dt_do)
+        dystans, spalanie = get_vehicle_stats(API_KEY, wybrany_id, dt_od, dt_do)
         
         if spalanie == 0.0 and dystans > 0:
             spalanie = (dystans / 100.0) * srednia_norma
@@ -142,7 +145,7 @@ df = pd.DataFrame(flota_dane)
 
 # KONTROLA BRAKU DANYCH
 if df.empty or df["Dystans_km"].sum() == 0:
-    st.info(f"ℹ️ Brak zarejestrowanych tras w wybranym okresie ({dt_od.strftime('%d.%m.%Y %H:%M')} - {dt_do.strftime('%d.%m.%Y %H:%M')}). Upewnij się, że pojazdy wykonywały przejazdy w tym czasie.")
+    st.info(f"ℹ️ Brak zarejestrowanych tras w wybranym okresie ({dt_od.strftime('%d.%m.%Y %H:%M')} - {dt_do.strftime('%d.%m.%Y %H:%M')}).")
 else:
     # KALKULACJE KOSZTOWE
     df["Koszt_Paliwa"] = df["Spalanie_L"] * cena_paliwa
