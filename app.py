@@ -30,55 +30,59 @@ def get_vehicles_list(api_key):
     except Exception:
         return []
 
-# --- 2. POBIERANIE PRECYZYJNYCH DANYCH Z PODSUMOWANIA LUB TRAS ---
+# --- 2. PRECYZYJNE OBLICZANIE ODOMETRU I PALIWA Z APEX TRAS ---
 @st.cache_data(ttl=60)
-def get_vehicle_summary(api_key, vehicle_id, dt_from, dt_to):
+def get_vehicle_exact_metrics(api_key, vehicle_id, dt_from, dt_to):
     from_str = dt_from.strftime("%Y-%m-%dT%H:%M:%SZ")
     to_str = dt_to.strftime("%Y-%m-%dT%H:%M:%SZ")
     
-    # Najpierw próbujemy pobrać raport podsumowujący (Summary Report)
-    url_summary = f"https://api.fm-track.com/reports/summary?version=1&object_ids={vehicle_id}&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
+    url = f"https://api.fm-track.com/objects/{vehicle_id}/trips?version=1&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
     
     try:
-        resp = requests.get(url_summary, timeout=10)
-        if resp.status_code == 200:
-            s_data = resp.json()
-            items = s_data.get("items", s_data.get("objects", [])) if isinstance(s_data, dict) else s_data
-            if isinstance(items, list) and len(items) > 0:
-                item = items[0]
-                # Pobieramy kilometry i paliwo z raportu
-                km = item.get("mileage", item.get("distance", 0.0))
-                fuel = item.get("fuel_consumed", item.get("fuel", 0.0))
-                
-                # Jeśli kilometry podane są w metrach, dzielimy przez 1000
-                km = float(km) / 1000.0 if float(km) > 10000 else float(km)
-                return km, float(fuel) if fuel else 0.0
-    except Exception:
-        pass
-
-    # Rezerwowo: pobranie ze ścieżki /trips
-    url_trips = f"https://api.fm-track.com/objects/{vehicle_id}/trips?version=1&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
-    try:
-        resp = requests.get(url_trips, timeout=15)
-        if resp.status_code == 200:
-            res_data = resp.json()
-            trips_list = res_data.get("trips", []) if isinstance(res_data, dict) else []
-            if not trips_list:
-                return 0.0, 0.0
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return 0.0, 0.0
             
-            # Wirtualny drogomierz: różnica między ostatnim a pierwszym odczytem z odometru
-            first_odo = float(trips_list[0].get("odometer", trips_list[0].get("virtual_odometer", 0.0)))
-            last_odo = float(trips_list[-1].get("odometer", trips_list[-1].get("virtual_odometer", 0.0)))
+        data = resp.json()
+        trips = data.get("trips", []) if isinstance(data, dict) else []
+        
+        if not trips:
+            return 0.0, 0.0
             
-            if last_odo > first_odo and first_odo > 0:
-                diff_km = (last_odo - first_odo)
-                diff_km = diff_km / 1000.0 if diff_km > 10000 else diff_km
-            else:
-                diff_km = sum(float(t.get("mileage", 0.0)) for t in trips_list) / 1000.0
+        # 1. POBRANIE WIRTUALNEGO ODOMETRU (ODCZYT CAN / GPS ODOMETER)
+        # Szukamy odometru w pierwszym i ostatnim punkcie odcinka
+        first_trip = trips[0]
+        last_trip = trips[-1]
+        
+        start_odo = first_trip.get("start_odometer") or first_trip.get("odometer_start") or first_trip.get("odometer") or 0.0
+        end_odo = last_trip.get("end_odometer") or last_trip.get("odometer_end") or last_trip.get("odometer") or 0.0
+        
+        start_odo = float(start_odo)
+        end_odo = float(end_odo)
+        
+        # Jeśli odometry są wyrażone w metrach
+        if start_odo > 1000000:
+            start_odo /= 1000.0
+        if end_odo > 1000000:
+            end_odo /= 1000.0
+            
+        distance = 0.0
+        if end_odo > start_odo and start_odo > 0:
+            distance = end_odo - start_odo
+        else:
+            # Rezerwowo: suma dystansów z poszczególnych tras
+            for t in trips:
+                d = float(t.get("mileage", t.get("distance", 0.0)))
+                distance += (d / 1000.0 if d > 10000 else d)
                 
-            total_fuel = sum(float(t.get("fuel_consumed", t.get("fuel", 0.0))) for t in trips_list)
-            return diff_km, total_fuel
-        return 0.0, 0.0
+        # 2. SUMOWANIE ZUŻYCIA PALIWA
+        total_fuel = 0.0
+        for t in trips:
+            f = float(t.get("fuel_consumed", t.get("fuel", t.get("fuel_used", 0.0))))
+            total_fuel += f
+            
+        return distance, total_fuel
+        
     except Exception:
         return 0.0, 0.0
 
@@ -123,12 +127,12 @@ oplaty_drogowe = st.sidebar.number_input("Dodatkowe koszty / e-TOLL (PLN):", val
 # --- PRZETWARZANIE DANYCH ---
 flota_dane = []
 
-with st.spinner("Pobieranie przejazdów z Rupteli..."):
+with st.spinner("Pobieranie dokładnego kilometrażu z Ruptela API..."):
     if wybrany_id == "ALL":
         for v in vehicles:
             v_id = v.get("id")
             v_name = v.get("name", "Pojazd")
-            dystans, spalanie = get_vehicle_summary(API_KEY, v_id, dt_od, dt_do)
+            dystans, spalanie = get_vehicle_exact_metrics(API_KEY, v_id, dt_od, dt_do)
             
             if spalanie == 0.0 and dystans > 0:
                 spalanie = (dystans / 100.0) * srednia_norma
@@ -139,7 +143,7 @@ with st.spinner("Pobieranie przejazdów z Rupteli..."):
                 "Spalanie_L": spalanie
             })
     else:
-        dystans, spalanie = get_vehicle_summary(API_KEY, wybrany_id, dt_od, dt_do)
+        dystans, spalanie = get_vehicle_exact_metrics(API_KEY, wybrany_id, dt_od, dt_do)
         
         if spalanie == 0.0 and dystans > 0:
             spalanie = (dystans / 100.0) * srednia_norma
