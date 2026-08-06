@@ -1,17 +1,43 @@
-import pytz
+import streamlit as st
+import requests
+import pandas as pd
+from datetime import datetime, timedelta, time, timezone
 
-# Zastąp funkcję get_vehicle_trips tą wersją:
+st.set_page_config(
+    page_title="Koszty Floty - Ruptela",
+    page_icon="🚛",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.title("🚛 Rozliczenie Kosztów Floty - Ruptela API")
+
+API_KEY = st.secrets.get("RUPTELA_API_KEY", "")
+
+if not API_KEY:
+    st.error("❌ Brak klucza RUPTELA_API_KEY w Secrets!")
+    st.stop()
+
+# --- 1. POBIERANIE LISTY POJAZDÓW ---
+@st.cache_data(ttl=300)
+def get_vehicles_list(api_key):
+    url = f"https://api.fm-track.com/objects?version=1&api_key={api_key}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return []
+    except Exception:
+        return []
+
+# --- 2. POBIERANIE TRAS Z KOREKTĄ STREFY CZASOWEJ (UTC+2) ---
 @st.cache_data(ttl=60)
 def get_vehicle_trips(api_key, vehicle_id, dt_from, dt_to):
-    # Ruptela w panelu działa w czasie lokalnym (Europe/Warsaw)
-    # Konwertujemy czas z interfejsu Streamlit na UTC, aby API nie ucinało 2 godzin
-    local_tz = pytz.timezone("Europe/Warsaw")
-    
-    dt_from_loc = local_tz.localize(dt_from)
-    dt_to_loc = local_tz.localize(dt_to)
-    
-    dt_from_utc = dt_from_loc.astimezone(pytz.utc)
-    dt_to_utc = dt_to_loc.astimezone(pytz.utc)
+    # Czas w Polsce w okresie letnim to UTC+2
+    # Przesuwamy czas o 2 godziny wstecz, aby przekazać czysty UTC do API
+    tz_offset = timedelta(hours=2)
+    dt_from_utc = dt_from - tz_offset
+    dt_to_utc = dt_to - tz_offset
     
     from_str = dt_from_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     to_str = dt_to_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -32,7 +58,6 @@ def get_vehicle_trips(api_key, vehicle_id, dt_from, dt_to):
             has_can_fuel = False
             
             for trip in trips_list:
-                # Sumujemy mileage (w metrach)
                 dist_m = trip.get("mileage", 0.0)
                 if dist_m:
                     total_distance_m += float(dist_m)
@@ -47,3 +72,116 @@ def get_vehicle_trips(api_key, vehicle_id, dt_from, dt_to):
         return 0.0, 0.0
     except Exception:
         return 0.0, 0.0
+
+# --- PANEL BOCZNY: FILTRY ---
+st.sidebar.header("🔍 Filtry i Ustawienia")
+
+vehicles = get_vehicles_list(API_KEY)
+options_map = {"Wszystkie pojazdy": "ALL"}
+
+for v in vehicles:
+    v_id = v.get("id")
+    name = v.get("name", "Brak nazwy")
+    options_map[name] = v_id
+
+wybrane_auto_label = st.sidebar.selectbox("Wybierz pojazd:", list(options_map.keys()))
+wybrany_id = options_map[wybrane_auto_label]
+
+dzis = datetime.now()
+siedem_dni_temu = dzis - timedelta(days=7)
+
+col_d1, col_t1 = st.sidebar.columns(2)
+with col_d1:
+    data_od = st.date_input("Data od:", siedem_dni_temu)
+with col_t1:
+    godz_od = st.time_input("Godzina od:", time(0, 0))
+
+col_d2, col_t2 = st.sidebar.columns(2)
+with col_d2:
+    data_do = st.date_input("Data do:", dzis)
+with col_t2:
+    godz_do = st.time_input("Godzina do:", time(23, 59))
+
+dt_od = datetime.combine(data_od, godz_od)
+dt_do = datetime.combine(data_do, godz_do)
+
+st.sidebar.divider()
+st.sidebar.header("⚙️ Parametry kosztowe")
+cena_paliwa = st.sidebar.number_input("Cena ON za litr (PLN netto):", value=6.20, step=0.05, format="%.2f")
+srednia_norma = st.sidebar.number_input("Domyślna norma spalania (L/100km):", value=18.0, step=0.5)
+oplaty_drogowe = st.sidebar.number_input("Dodatkowe koszty / e-TOLL (PLN):", value=0.0, step=50.0)
+
+# --- PRZETWARZANIE DANYCH ---
+flota_dane = []
+
+with st.spinner("Pobieranie i przeliczanie tras z Ruptela API..."):
+    if wybrany_id == "ALL":
+        for v in vehicles:
+            v_id = v.get("id")
+            v_name = v.get("name", "Pojazd")
+            dystans, spalanie = get_vehicle_trips(API_KEY, v_id, dt_od, dt_do)
+            
+            if spalanie == 0.0 and dystans > 0:
+                spalanie = (dystans / 100.0) * srednia_norma
+                
+            flota_dane.append({
+                "Pojazd": v_name,
+                "Dystans_km": dystans,
+                "Spalanie_L": spalanie
+            })
+    else:
+        dystans, spalanie = get_vehicle_trips(API_KEY, wybrany_id, dt_od, dt_do)
+        
+        if spalanie == 0.0 and dystans > 0:
+            spalanie = (dystans / 100.0) * srednia_norma
+            
+        flota_dane.append({
+            "Pojazd": wybrane_auto_label,
+            "Dystans_km": dystans,
+            "Spalanie_L": spalanie
+        })
+
+df = pd.DataFrame(flota_dane)
+
+# KONTROLA BRAKU DANYCH
+if df.empty or df["Dystans_km"].sum() == 0:
+    st.info(f"ℹ️ Brak zarejestrowanych tras w wybranym okresie ({dt_od.strftime('%d.%m.%Y %H:%M')} - {dt_do.strftime('%d.%m.%Y %H:%M')}). Upewnij się, że pojazdy wykonywały przejazdy w tym czasie.")
+else:
+    # KALKULACJE KOSZTOWE
+    df["Koszt_Paliwa"] = df["Spalanie_L"] * cena_paliwa
+    df["Średnie_l/100km"] = df.apply(
+        lambda r: (r["Spalanie_L"] / r["Dystans_km"] * 100) if r["Dystans_km"] > 0 else 0, axis=1
+    )
+
+    suma_km = df["Dystans_km"].sum()
+    suma_litry = df["Spalanie_L"].sum()
+    suma_koszt_paliwa = df["Koszt_Paliwa"].sum()
+    calkowity_koszt = suma_koszt_paliwa + oplaty_drogowe
+    sredni_koszt_km = calkowity_koszt / suma_km if suma_km > 0 else 0.0
+
+    # WSKAŹNIKI (KPI)
+    st.subheader(f"📊 Wyniki za okres: {dt_od.strftime('%d.%m.%Y %H:%M')} - {dt_do.strftime('%d.%m.%Y %H:%M')}")
+    
+    k1, k2 = st.columns(2)
+    k3, k4 = st.columns(2)
+    
+    k1.metric("Łączny Dystans", f"{suma_km:,.2f} km".replace(",", " "))
+    k2.metric("Zużyte Paliwo", f"{suma_litry:,.2f} L".replace(",", " "))
+    k3.metric("Łączny Koszt", f"{calkowity_koszt:,.2f} PLN".replace(",", " "))
+    k4.metric("Koszt na 1 km", f"{sredni_koszt_km:.2f} PLN/km")
+
+    # TABELA DANYCH
+    st.divider()
+    st.subheader("📋 Podsumowanie wg pojazdów")
+    st.dataframe(
+        df[["Pojazd", "Dystans_km", "Spalanie_L", "Średnie_l/100km", "Koszt_Paliwa"]].style.format({
+            "Dystans_km": "{:.2f} km",
+            "Spalanie_L": "{:.2f} L",
+            "Średnie_l/100km": "{:.2f} l/100km",
+            "Koszt_Paliwa": "{:.2f} PLN"
+        }),
+        use_container_width=True
+    )
+    
+    st.subheader("📈 Podział kosztu paliwa")
+    st.bar_chart(df.set_index("Pojazd")["Koszt_Paliwa"])
