@@ -29,52 +29,68 @@ def get_vehicles_list(api_key):
     except Exception:
         return []
 
-# --- 2. POBIERANIE DANYCH BEZPOŚREDNIO Z API RUPTELA ---
+# --- 2. POBIERANIE ZAPISÓW TRAS Z ODOMETREM I ZUŻYCIEM PALIWA ---
 def get_vehicle_stats(api_key, vehicle_id, dt_from, dt_to):
-    # Daty w formacie lokalnym bez sztucznego przesuwania stref (tak jak panel WWW)
-    from_str = dt_from.strftime("%Y-%m-%dT%H:%M:%S")
-    to_str = dt_to.strftime("%Y-%m-%dT%H:%M:%S")
+    # Przesunięcie o strefę UTC (Polska czas letni: UTC+2)
+    tz_offset = timedelta(hours=2)
+    dt_from_utc = dt_from - tz_offset
+    dt_to_utc = dt_to - tz_offset
     
-    # Próba 1: Raport zbiorczy (najdokładniejszy, zgodny z panelem WWW)
-    summary_url = f"https://api.fm-track.com/reports/summary?version=1&objects={vehicle_id}&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
+    from_str = dt_from_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    to_str = dt_to_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    url = f"https://api.fm-track.com/objects/{vehicle_id}/trips?version=1&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
     
     try:
-        resp = requests.get(summary_url, timeout=15)
-        if resp.status_code == 200:
-            res = resp.json()
-            # Parsowanie różnych struktur odpowiedzi z API Rupteli
-            records = res.get("reports", []) or res.get("items", []) or res.get("objects", []) or res.get("data", [])
-            
-            if records:
-                item = records[0]
-                # Pobranie dystansu i paliwa
-                dist = float(item.get("mileage", item.get("distance", item.get("virtual_mileage", 0.0))))
-                fuel = float(item.get("fuel_consumed", item.get("fuel", item.get("fuel_used", 0.0))))
-                
-                # Jeśli dystans podany w metrach, przelicz na km
-                if dist > 50000:
-                    dist = dist / 1000.0
-                    
-                if dist > 0:
-                    return dist, fuel
-    except Exception:
-        pass
-
-    # Próba 2: Zapasowy odczyt z /trips (sumowanie + wyciąganie odometru)
-    trips_url = f"https://api.fm-track.com/objects/{vehicle_id}/trips?version=1&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
-    try:
-        resp = requests.get(trips_url, timeout=15)
+        resp = requests.get(url, timeout=15)
         if resp.status_code == 200:
             res_data = resp.json()
-            trips_list = res_data.get("trips", []) if isinstance(res_data, dict) else []
             
+            # Pobieramy listę przejazdów z odpowiedniego klucza
+            trips_list = []
+            if isinstance(res_data, dict):
+                trips_list = res_data.get("trips", res_data.get("items", res_data.get("data", [])))
+            elif isinstance(res_data, list):
+                trips_list = res_data
+                
             if not trips_list:
                 return 0.0, 0.0
             
-            total_dist_m = sum(float(t.get("mileage", 0.0)) for t in trips_list)
-            total_fuel = sum(float(t.get("fuel_consumed", t.get("fuel", t.get("fuel_used", 0.0)) or 0.0)) for t in trips_list)
+            # --- OBLISZANIE DYSTANSU ---
+            # 1. Próba obliczenia wg drogomierza wirtualnego/odometru (stan końcowy - początkowy)
+            start_odo = None
+            end_odo = None
             
-            return total_dist_m / 1000.0, total_fuel
+            for trip in trips_list:
+                # Szukamy pierwszego ważnego odometru początkowego
+                if start_odo is None:
+                    so = trip.get("start_odometer", trip.get("odometer_start", trip.get("start_mileage")))
+                    if so is not None and float(so) > 0:
+                        start_odo = float(so)
+                # Aktualizujemy ostatni znany odometr końcowy
+                eo = trip.get("end_odometer", trip.get("odometer_end", trip.get("end_mileage", trip.get("odometer"))))
+                if eo is not None and float(eo) > 0:
+                    end_odo = float(eo)
+
+            total_distance_km = 0.0
+            if start_odo is not None and end_odo is not None and end_odo > start_odo:
+                diff = end_odo - start_odo
+                total_distance_km = diff / 1000.0 if diff > 50000 else diff
+            else:
+                # Fallback: sumowanie pojedynczych odcinków jeśli brak odometru
+                sum_m = sum(float(t.get("mileage", t.get("distance", 0.0)) or 0.0) for t in trips_list)
+                total_distance_km = sum_m / 1000.0 if sum_m > 50000 else sum_m
+
+            # --- OBLICZANIE PALIWA CAN ---
+            total_fuel_l = 0.0
+            for t in trips_list:
+                # Szukamy pola z paliwem z magistrali CAN w strukturze tripu
+                fuel_val = t.get("fuel_consumed", t.get("fuel_used", t.get("fuel", t.get("can_fuel", 0.0))))
+                if fuel_val is not None:
+                    total_fuel_l += float(fuel_val)
+
+            return total_distance_km, total_fuel_l
+            
         return 0.0, 0.0
     except Exception:
         return 0.0, 0.0
@@ -120,13 +136,14 @@ oplaty_drogowe = st.sidebar.number_input("Dodatkowe koszty / e-TOLL (PLN):", val
 # --- PRZETWARZANIE DANYCH ---
 flota_dane = []
 
-with st.spinner("Pobieranie dokładnych danych z Ruptela API..."):
+with st.spinner("Pobieranie danych z Ruptela API..."):
     if wybrany_id == "ALL":
         for v in vehicles:
             v_id = v.get("id")
             v_name = v.get("name", "Pojazd")
             dystans, spalanie = get_vehicle_stats(API_KEY, v_id, dt_od, dt_do)
             
+            # Jeśli w CAN brak zużycia paliwa, wyliczamy z normy z suwaka
             if spalanie == 0.0 and dystans > 0:
                 spalanie = (dystans / 100.0) * srednia_norma
                 
@@ -138,6 +155,7 @@ with st.spinner("Pobieranie dokładnych danych z Ruptela API..."):
     else:
         dystans, spalanie = get_vehicle_stats(API_KEY, wybrany_id, dt_od, dt_do)
         
+        # Jeśli w CAN brak zużycia paliwa, wyliczamy z normy z suwaka
         if spalanie == 0.0 and dystans > 0:
             spalanie = (dystans / 100.0) * srednia_norma
             
