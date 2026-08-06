@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime, timedelta, time
+import time as ttime
 
 st.set_page_config(
     page_title="Koszty Floty - Ruptela",
@@ -29,9 +30,9 @@ def get_vehicles_list(api_key):
     except Exception:
         return []
 
-# --- 2. POBIERANIE ZAPISÓW TRAS Z ODOMETREM I ZUŻYCIEM PALIWA ---
+# --- 2. POBIERANIE TRAS I PALIWA Z PEŁNĄ DIAGNOSTYKĄ ---
 def get_vehicle_stats(api_key, vehicle_id, dt_from, dt_to):
-    # Przesunięcie o strefę UTC (Polska czas letni: UTC+2)
+    # Czas w UTC dla API
     tz_offset = timedelta(hours=2)
     dt_from_utc = dt_from - tz_offset
     dt_to_utc = dt_to - tz_offset
@@ -44,56 +45,36 @@ def get_vehicle_stats(api_key, vehicle_id, dt_from, dt_to):
     try:
         resp = requests.get(url, timeout=15)
         if resp.status_code == 200:
-            res_data = resp.json()
+            data = resp.json()
+            trips = data.get("trips", []) if isinstance(data, dict) else data
             
-            # Pobieramy listę przejazdów z odpowiedniego klucza
-            trips_list = []
-            if isinstance(res_data, dict):
-                trips_list = res_data.get("trips", res_data.get("items", res_data.get("data", [])))
-            elif isinstance(res_data, list):
-                trips_list = res_data
-                
-            if not trips_list:
-                return 0.0, 0.0
+            if not trips:
+                return 0.0, 0.0, data
             
-            # --- OBLISZANIE DYSTANSU ---
-            # 1. Próba obliczenia wg drogomierza wirtualnego/odometru (stan końcowy - początkowy)
-            start_odo = None
-            end_odo = None
+            # Pobieramy dystans z odometru (start vs end całego okresu)
+            first_trip = trips[0]
+            last_trip = trips[-1]
             
-            for trip in trips_list:
-                # Szukamy pierwszego ważnego odometru początkowego
-                if start_odo is None:
-                    so = trip.get("start_odometer", trip.get("odometer_start", trip.get("start_mileage")))
-                    if so is not None and float(so) > 0:
-                        start_odo = float(so)
-                # Aktualizujemy ostatni znany odometr końcowy
-                eo = trip.get("end_odometer", trip.get("odometer_end", trip.get("end_mileage", trip.get("odometer"))))
-                if eo is not None and float(eo) > 0:
-                    end_odo = float(eo)
-
-            total_distance_km = 0.0
-            if start_odo is not None and end_odo is not None and end_odo > start_odo:
-                diff = end_odo - start_odo
-                total_distance_km = diff / 1000.0 if diff > 50000 else diff
+            # Odczyt drogomierza
+            o_start = float(first_trip.get("start_odometer") or first_trip.get("odometer") or 0)
+            o_end = float(last_trip.get("end_odometer") or last_trip.get("odometer") or 0)
+            
+            if o_end > o_start and o_start > 0:
+                dist_km = (o_end - o_start) / 1000.0
             else:
-                # Fallback: sumowanie pojedynczych odcinków jeśli brak odometru
-                sum_m = sum(float(t.get("mileage", t.get("distance", 0.0)) or 0.0) for t in trips_list)
-                total_distance_km = sum_m / 1000.0 if sum_m > 50000 else sum_m
-
-            # --- OBLICZANIE PALIWA CAN ---
-            total_fuel_l = 0.0
-            for t in trips_list:
-                # Szukamy pola z paliwem z magistrali CAN w strukturze tripu
-                fuel_val = t.get("fuel_consumed", t.get("fuel_used", t.get("fuel", t.get("can_fuel", 0.0))))
-                if fuel_val is not None:
-                    total_fuel_l += float(fuel_val)
-
-            return total_distance_km, total_fuel_l
+                dist_km = sum(float(t.get("mileage", 0) or 0) for t in trips) / 1000.0
+                
+            # Odczyt paliwa z magistrali CAN ze wszystkich pól
+            fuel_l = 0.0
+            for t in trips:
+                f_val = t.get("fuel_consumed") or t.get("fuel_used") or t.get("fuel") or 0.0
+                fuel_l += float(f_val)
+                
+            return dist_km, fuel_l, data
             
-        return 0.0, 0.0
-    except Exception:
-        return 0.0, 0.0
+        return 0.0, 0.0, {"error": f"HTTP {resp.status_code}", "body": resp.text}
+    except Exception as e:
+        return 0.0, 0.0, {"error": str(e)}
 
 # --- PANEL BOCZNY: FILTRY ---
 st.sidebar.header("🔍 Filtry i Ustawienia")
@@ -131,81 +112,50 @@ st.sidebar.divider()
 st.sidebar.header("⚙️ Parametry kosztowe")
 cena_paliwa = st.sidebar.number_input("Cena ON za litr (PLN netto):", value=6.20, step=0.05, format="%.2f")
 srednia_norma = st.sidebar.number_input("Domyślna norma spalania (L/100km):", value=21.33, step=0.5)
-oplaty_drogowe = st.sidebar.number_input("Dodatkowe koszty / e-TOLL (PLN):", value=0.0, step=50.0)
 
-# --- PRZETWARZANIE DANYCH ---
+# --- PRZETWARZANIE ---
 flota_dane = []
+raw_debug = {}
 
 with st.spinner("Pobieranie danych z Ruptela API..."):
     if wybrany_id == "ALL":
         for v in vehicles:
             v_id = v.get("id")
             v_name = v.get("name", "Pojazd")
-            dystans, spalanie = get_vehicle_stats(API_KEY, v_id, dt_od, dt_do)
+            dystans, spalanie, debug_json = get_vehicle_stats(API_KEY, v_id, dt_od, dt_do)
             
-            # Jeśli w CAN brak zużycia paliwa, wyliczamy z normy z suwaka
             if spalanie == 0.0 and dystans > 0:
                 spalanie = (dystans / 100.0) * srednia_norma
                 
-            flota_dane.append({
-                "Pojazd": v_name,
-                "Dystans_km": dystans,
-                "Spalanie_L": spalanie
-            })
+            flota_dane.append({"Pojazd": v_name, "Dystans_km": dystans, "Spalanie_L": spalanie})
+            raw_debug[v_name] = debug_json
     else:
-        dystans, spalanie = get_vehicle_stats(API_KEY, wybrany_id, dt_od, dt_do)
+        dystans, spalanie, debug_json = get_vehicle_stats(API_KEY, wybrany_id, dt_od, dt_do)
         
-        # Jeśli w CAN brak zużycia paliwa, wyliczamy z normy z suwaka
         if spalanie == 0.0 and dystans > 0:
             spalanie = (dystans / 100.0) * srednia_norma
             
-        flota_dane.append({
-            "Pojazd": wybrane_auto_label,
-            "Dystans_km": dystans,
-            "Spalanie_L": spalanie
-        })
+        flota_dane.append({"Pojazd": wybrane_auto_label, "Dystans_km": dystans, "Spalanie_L": spalanie})
+        raw_debug[wybrane_auto_label] = debug_json
 
 df = pd.DataFrame(flota_dane)
 
-# KONTROLA BRAKU DANYCH
-if df.empty or df["Dystans_km"].sum() == 0:
-    st.info(f"ℹ️ Brak zarejestrowanych tras w wybranym okresie ({dt_od.strftime('%d.%m.%Y %H:%M')} - {dt_do.strftime('%d.%m.%Y %H:%M')}).")
-else:
-    # KALKULACJE KOSZTOWE
+if not df.empty and df["Dystans_km"].sum() > 0:
     df["Koszt_Paliwa"] = df["Spalanie_L"] * cena_paliwa
-    df["Średnie_l/100km"] = df.apply(
-        lambda r: (r["Spalanie_L"] / r["Dystans_km"] * 100) if r["Dystans_km"] > 0 else 0, axis=1
-    )
+    df["Średnie_l/100km"] = df.apply(lambda r: (r["Spalanie_L"] / r["Dystans_km"] * 100) if r["Dystans_km"] > 0 else 0, axis=1)
 
-    suma_km = df["Dystans_km"].sum()
-    suma_litry = df["Spalanie_L"].sum()
-    suma_koszt_paliwa = df["Koszt_Paliwa"].sum()
-    calkowity_koszt = suma_koszt_paliwa + oplaty_drogowe
-    sredni_koszt_km = calkowity_koszt / suma_km if suma_km > 0 else 0.0
-
-    # WSKAŹNIKI (KPI)
     st.subheader(f"📊 Wyniki za okres: {dt_od.strftime('%d.%m.%Y %H:%M')} - {dt_do.strftime('%d.%m.%Y %H:%M')}")
     
     k1, k2 = st.columns(2)
     k3, k4 = st.columns(2)
     
-    k1.metric("Łączny Dystans", f"{suma_km:,.2f} km".replace(",", " "))
-    k2.metric("Zużyte Paliwo", f"{suma_litry:,.2f} L".replace(",", " "))
-    k3.metric("Łączny Koszt", f"{calkowity_koszt:,.2f} PLN".replace(",", " "))
-    k4.metric("Koszt na 1 km", f"{sredni_koszt_km:.2f} PLN/km")
+    k1.metric("Łączny Dystans", f"{df['Dystans_km'].sum():,.2f} km".replace(",", " "))
+    k2.metric("Zużyte Paliwo", f"{df['Spalanie_L'].sum():,.2f} L".replace(",", " "))
+    k3.metric("Łączny Koszt", f"{df['Koszt_Paliwa'].sum():,.2f} PLN".replace(",", " "))
+    k4.metric("Koszt na 1 km", f"{(df['Koszt_Paliwa'].sum() / df['Dystans_km'].sum()):.2f} PLN/km" if df['Dystans_km'].sum() > 0 else "0.00 PLN/km")
 
-    # TABELA DANYCH
-    st.divider()
-    st.subheader("📋 Podsumowanie wg pojazdów")
-    st.dataframe(
-        df[["Pojazd", "Dystans_km", "Spalanie_L", "Średnie_l/100km", "Koszt_Paliwa"]].style.format({
-            "Dystans_km": "{:.2f} km",
-            "Spalanie_L": "{:.2f} L",
-            "Średnie_l/100km": "{:.2f} l/100km",
-            "Koszt_Paliwa": "{:.2f} PLN"
-        }),
-        use_container_width=True
-    )
-    
-    st.subheader("📈 Podział kosztu paliwa")
-    st.bar_chart(df.set_index("Pojazd")["Koszt_Paliwa"])
+    st.dataframe(df, use_container_width=True)
+
+# SEKACJA DEBUGOWANIA - POKAŻE CO NAPRAWDĘ ZWRACA API RUPTELI
+with st.expander("🛠️ Diagnostyka Ruptela API (Rozwiń, aby sprawdzić surowe dane)"):
+    st.json(raw_debug)
