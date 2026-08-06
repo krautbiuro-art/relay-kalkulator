@@ -30,7 +30,7 @@ def get_vehicles_list(api_key):
     except Exception:
         return []
 
-# --- 2. POBIERANIE DANYCH TRAS DLA POJAZDU ---
+# --- 2. POBIERANIE DANYCH TRAS DLA POJAZDU (PRAWIDŁOWA RÓŻNICA DROGOWSKAZU) ---
 @st.cache_data(ttl=60)
 def get_vehicle_trips(api_key, vehicle_id, date_from, date_to):
     from_str = date_from.strftime("%Y-%m-%dT00:00:00Z")
@@ -42,8 +42,6 @@ def get_vehicle_trips(api_key, vehicle_id, date_from, date_to):
         resp = requests.get(url, timeout=15)
         if resp.status_code == 200:
             res_data = resp.json()
-            
-            # Pobieramy tablicę tras z klucza 'trips'
             trips_list = res_data.get("trips", []) if isinstance(res_data, dict) else []
             
             if not trips_list:
@@ -52,15 +50,32 @@ def get_vehicle_trips(api_key, vehicle_id, date_from, date_to):
             total_distance = 0.0
             total_fuel = 0.0
             
-            for trip in trips_list:
-                # Dystans z API Ruptela
-                dist = trip.get("mileage", trip.get("distance", 0.0))
+            # Sprawdzamy czy pierwsze trip ma pole distance, czy wyliczamy różnicę odometru
+            first_trip = trips_list[0]
+            last_trip = trips_list[-1]
+            
+            # 1. Sprawdzamy dedykowane pola odcinka (np. trip_distance, distance)
+            if "distance" in first_trip and first_trip["distance"] is not None and float(first_trip["distance"]) < 10000:
+                for trip in trips_list:
+                    total_distance += float(trip.get("distance", 0.0))
+                    total_fuel += float(trip.get("fuel_consumed", trip.get("fuel", 0.0)))
+            else:
+                # 2. Jeśli 'mileage' to całkowity stan odometru, wyliczamy różnicę między końcem a początkiem okresu
+                start_odo = float(first_trip.get("mileage", 0.0))
+                end_odo = float(last_trip.get("mileage", 0.0))
                 
-                # Odczyt paliwa jeśli występuje w trasie (lub przeliczenie zapasowe)
-                fuel = trip.get("fuel_consumed", trip.get("fuel", trip.get("fuel_used", 0.0)))
+                raw_diff = end_odo - start_odo
                 
-                total_distance += float(dist) if dist else 0.0
-                total_fuel += float(fuel) if fuel else 0.0
+                # Jeśli odometr podawany jest w metrach (np. > 100 000 dla małego okresu), przeliczamy na km (/ 1000)
+                if raw_diff > 50000:  
+                    total_distance = raw_diff / 1000.0
+                else:
+                    total_distance = max(0.0, raw_diff)
+                    
+                # Sumowanie paliwa jeśli występuje
+                for trip in trips_list:
+                    f = trip.get("fuel_consumed", trip.get("fuel", 0.0))
+                    total_fuel += float(f) if f else 0.0
                 
             return total_distance, total_fuel
         return 0.0, 0.0
@@ -103,7 +118,6 @@ with st.spinner("Pobieranie przejazdów z Rupteli..."):
             v_name = v.get("name", "Pojazd")
             dystans, spalanie = get_vehicle_trips(API_KEY, v_id, data_od, data_do)
             
-            # Jeśli lokalizator nie zwraca bezpośrednio spalania w litrach z magistrali CAN, wyliczamy z normy
             if spalanie == 0.0 and dystans > 0:
                 spalanie = (dystans / 100.0) * srednia_norma
                 
