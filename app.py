@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, timedelta, time, timezone
+from datetime import datetime, timedelta, time
 
 st.set_page_config(
     page_title="Koszty Floty - Ruptela",
@@ -19,7 +19,6 @@ if not API_KEY:
     st.stop()
 
 # --- 1. POBIERANIE LISTY POJAZDÓW ---
-@st.cache_data(ttl=300)
 def get_vehicles_list(api_key):
     url = f"https://api.fm-track.com/objects?version=1&api_key={api_key}"
     try:
@@ -30,11 +29,9 @@ def get_vehicles_list(api_key):
     except Exception:
         return []
 
-# --- 2. POBIERANIE TRAS Z KOREKTĄ STREFY CZASOWEJ (UTC+2) ---
-@st.cache_data(ttl=60)
+# --- 2. POBIERANIE TRAS DLA WYBRANEGO POJAZDU I DAT ---
 def get_vehicle_trips(api_key, vehicle_id, dt_from, dt_to):
-    # Czas w Polsce w okresie letnim to UTC+2
-    # Przesuwamy czas o 2 godziny wstecz, aby przekazać czysty UTC do API
+    # Korekta czasu UTC+2 (czas letni w PL)
     tz_offset = timedelta(hours=2)
     dt_from_utc = dt_from - tz_offset
     dt_to_utc = dt_to - tz_offset
@@ -114,7 +111,7 @@ oplaty_drogowe = st.sidebar.number_input("Dodatkowe koszty / e-TOLL (PLN):", val
 # --- PRZETWARZANIE DANYCH ---
 flota_dane = []
 
-with st.spinner("Pobieranie i przeliczanie tras z Ruptela API..."):
+with st.spinner("Pobieranie danych z Ruptela API..."):
     if wybrany_id == "ALL":
         for v in vehicles:
             v_id = v.get("id")
