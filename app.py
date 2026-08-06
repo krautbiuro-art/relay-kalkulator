@@ -30,38 +30,54 @@ def get_vehicles_list(api_key):
     except Exception:
         return []
 
-# --- 2. POBIERANIE TRAS I SUMOWANIE DYSTANSU (Z UWZGLĘDNIENIEM GODZIN) ---
+# --- 2. POBIERANIE PRECYZYJNYCH DANYCH Z PODSUMOWANIA LUB TRAS ---
 @st.cache_data(ttl=60)
-def get_vehicle_trips(api_key, vehicle_id, dt_from, dt_to):
+def get_vehicle_summary(api_key, vehicle_id, dt_from, dt_to):
     from_str = dt_from.strftime("%Y-%m-%dT%H:%M:%SZ")
     to_str = dt_to.strftime("%Y-%m-%dT%H:%M:%SZ")
     
-    url = f"https://api.fm-track.com/objects/{vehicle_id}/trips?version=1&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
+    # Najpierw próbujemy pobrać raport podsumowujący (Summary Report)
+    url_summary = f"https://api.fm-track.com/reports/summary?version=1&object_ids={vehicle_id}&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
     
     try:
-        resp = requests.get(url, timeout=15)
+        resp = requests.get(url_summary, timeout=10)
+        if resp.status_code == 200:
+            s_data = resp.json()
+            items = s_data.get("items", s_data.get("objects", [])) if isinstance(s_data, dict) else s_data
+            if isinstance(items, list) and len(items) > 0:
+                item = items[0]
+                # Pobieramy kilometry i paliwo z raportu
+                km = item.get("mileage", item.get("distance", 0.0))
+                fuel = item.get("fuel_consumed", item.get("fuel", 0.0))
+                
+                # Jeśli kilometry podane są w metrach, dzielimy przez 1000
+                km = float(km) / 1000.0 if float(km) > 10000 else float(km)
+                return km, float(fuel) if fuel else 0.0
+    except Exception:
+        pass
+
+    # Rezerwowo: pobranie ze ścieżki /trips
+    url_trips = f"https://api.fm-track.com/objects/{vehicle_id}/trips?version=1&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
+    try:
+        resp = requests.get(url_trips, timeout=15)
         if resp.status_code == 200:
             res_data = resp.json()
             trips_list = res_data.get("trips", []) if isinstance(res_data, dict) else []
-            
             if not trips_list:
                 return 0.0, 0.0
             
-            total_distance_m = 0.0
-            total_fuel = 0.0
+            # Wirtualny drogomierz: różnica między ostatnim a pierwszym odczytem z odometru
+            first_odo = float(trips_list[0].get("odometer", trips_list[0].get("virtual_odometer", 0.0)))
+            last_odo = float(trips_list[-1].get("odometer", trips_list[-1].get("virtual_odometer", 0.0)))
             
-            for trip in trips_list:
-                dist_m = trip.get("mileage", 0.0)
-                if dist_m:
-                    total_distance_m += float(dist_m)
+            if last_odo > first_odo and first_odo > 0:
+                diff_km = (last_odo - first_odo)
+                diff_km = diff_km / 1000.0 if diff_km > 10000 else diff_km
+            else:
+                diff_km = sum(float(t.get("mileage", 0.0)) for t in trips_list) / 1000.0
                 
-                fuel = trip.get("fuel_consumed", trip.get("fuel", trip.get("fuel_used", 0.0)))
-                if fuel:
-                    total_fuel += float(fuel)
-            
-            total_distance_km = total_distance_m / 1000.0
-            
-            return total_distance_km, total_fuel
+            total_fuel = sum(float(t.get("fuel_consumed", t.get("fuel", 0.0))) for t in trips_list)
+            return diff_km, total_fuel
         return 0.0, 0.0
     except Exception:
         return 0.0, 0.0
@@ -95,7 +111,6 @@ with col_d2:
 with col_t2:
     godz_do = st.time_input("Godzina do:", time(23, 59))
 
-# Łączenie daty i godziny w jeden obiekt datetime
 dt_od = datetime.combine(data_od, godz_od)
 dt_do = datetime.combine(data_do, godz_do)
 
@@ -113,7 +128,7 @@ with st.spinner("Pobieranie przejazdów z Rupteli..."):
         for v in vehicles:
             v_id = v.get("id")
             v_name = v.get("name", "Pojazd")
-            dystans, spalanie = get_vehicle_trips(API_KEY, v_id, dt_od, dt_do)
+            dystans, spalanie = get_vehicle_summary(API_KEY, v_id, dt_od, dt_do)
             
             if spalanie == 0.0 and dystans > 0:
                 spalanie = (dystans / 100.0) * srednia_norma
@@ -124,7 +139,7 @@ with st.spinner("Pobieranie przejazdów z Rupteli..."):
                 "Spalanie_L": spalanie
             })
     else:
-        dystans, spalanie = get_vehicle_trips(API_KEY, wybrany_id, dt_od, dt_do)
+        dystans, spalanie = get_vehicle_summary(API_KEY, wybrany_id, dt_od, dt_do)
         
         if spalanie == 0.0 and dystans > 0:
             spalanie = (dystans / 100.0) * srednia_norma
