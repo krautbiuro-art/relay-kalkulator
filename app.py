@@ -30,7 +30,7 @@ def get_vehicles_list(api_key):
     except Exception:
         return []
 
-# --- 2. POBIERANIE DANYCH TRAS DLA POJAZDU (PRAWIDŁOWA RÓŻNICA DROGOWSKAZU) ---
+# --- 2. POBIERANIE TRAS I SUMOWANIE DYSTANSU (METRY -> KM) ---
 @st.cache_data(ttl=60)
 def get_vehicle_trips(api_key, vehicle_id, date_from, date_to):
     from_str = date_from.strftime("%Y-%m-%dT00:00:00Z")
@@ -47,37 +47,24 @@ def get_vehicle_trips(api_key, vehicle_id, date_from, date_to):
             if not trips_list:
                 return 0.0, 0.0
             
-            total_distance = 0.0
+            total_distance_m = 0.0
             total_fuel = 0.0
             
-            # Sprawdzamy czy pierwsze trip ma pole distance, czy wyliczamy różnicę odometru
-            first_trip = trips_list[0]
-            last_trip = trips_list[-1]
+            for trip in trips_list:
+                # 'mileage' w odczycie odcinka Rupteli to dystans w metrach
+                dist_m = trip.get("mileage", 0.0)
+                if dist_m:
+                    total_distance_m += float(dist_m)
+                
+                # Odczyt paliwa z magistrali CAN (jeśli dostępne w tripie)
+                fuel = trip.get("fuel_consumed", trip.get("fuel", trip.get("fuel_used", 0.0)))
+                if fuel:
+                    total_fuel += float(fuel)
             
-            # 1. Sprawdzamy dedykowane pola odcinka (np. trip_distance, distance)
-            if "distance" in first_trip and first_trip["distance"] is not None and float(first_trip["distance"]) < 10000:
-                for trip in trips_list:
-                    total_distance += float(trip.get("distance", 0.0))
-                    total_fuel += float(trip.get("fuel_consumed", trip.get("fuel", 0.0)))
-            else:
-                # 2. Jeśli 'mileage' to całkowity stan odometru, wyliczamy różnicę między końcem a początkiem okresu
-                start_odo = float(first_trip.get("mileage", 0.0))
-                end_odo = float(last_trip.get("mileage", 0.0))
-                
-                raw_diff = end_odo - start_odo
-                
-                # Jeśli odometr podawany jest w metrach (np. > 100 000 dla małego okresu), przeliczamy na km (/ 1000)
-                if raw_diff > 50000:  
-                    total_distance = raw_diff / 1000.0
-                else:
-                    total_distance = max(0.0, raw_diff)
-                    
-                # Sumowanie paliwa jeśli występuje
-                for trip in trips_list:
-                    f = trip.get("fuel_consumed", trip.get("fuel", 0.0))
-                    total_fuel += float(f) if f else 0.0
-                
-            return total_distance, total_fuel
+            # Konwersja metrów na kilometry
+            total_distance_km = total_distance_m / 1000.0
+            
+            return total_distance_km, total_fuel
         return 0.0, 0.0
     except Exception:
         return 0.0, 0.0
@@ -105,7 +92,7 @@ data_do = st.sidebar.date_input("Data do:", dzis)
 st.sidebar.divider()
 st.sidebar.header("⚙️ Parametry kosztowe")
 cena_paliwa = st.sidebar.number_input("Cena ON za litr (PLN netto):", value=6.20, step=0.05, format="%.2f")
-srednia_norma = st.sidebar.number_input("Domyślna norma spalania (L/100km):", value=29.0, step=0.5)
+srednia_norma = st.sidebar.number_input("Domyślna norma spalania (L/100km):", value=18.0, step=0.5)
 oplaty_drogowe = st.sidebar.number_input("Dodatkowe koszty / e-TOLL (PLN):", value=0.0, step=50.0)
 
 # --- PRZETWARZANIE DANYCH ---
@@ -162,8 +149,8 @@ else:
     k1, k2 = st.columns(2)
     k3, k4 = st.columns(2)
     
-    k1.metric("Łączny Dystans", f"{suma_km:,.1f} km".replace(",", " "))
-    k2.metric("Zużyte Paliwo", f"{suma_litry:,.1f} L".replace(",", " "))
+    k1.metric("Łączny Dystans", f"{suma_km:,.2f} km".replace(",", " "))
+    k2.metric("Zużyte Paliwo", f"{suma_litry:,.2f} L".replace(",", " "))
     k3.metric("Łączny Koszt", f"{calkowity_koszt:,.2f} PLN".replace(",", " "))
     k4.metric("Koszt na 1 km", f"{sredni_koszt_km:.2f} PLN/km")
 
@@ -172,8 +159,8 @@ else:
     st.subheader("📋 Podsumowanie wg pojazdów")
     st.dataframe(
         df[["Pojazd", "Dystans_km", "Spalanie_L", "Średnie_l/100km", "Koszt_Paliwa"]].style.format({
-            "Dystans_km": "{:.1f} km",
-            "Spalanie_L": "{:.1f} L",
+            "Dystans_km": "{:.2f} km",
+            "Spalanie_L": "{:.2f} L",
             "Średnie_l/100km": "{:.2f} l/100km",
             "Koszt_Paliwa": "{:.2f} PLN"
         }),
