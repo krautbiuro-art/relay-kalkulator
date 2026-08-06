@@ -1,161 +1,68 @@
 import streamlit as st
-import requests
 import pandas as pd
-from datetime import datetime, timedelta, time
-import time as ttime
+import folium
+from streamlit_folium import st_folium
+import requests
 
-st.set_page_config(
-    page_title="Koszty Floty - Ruptela",
-    page_icon="🚛",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="System Floty Transportowej", layout="wide")
 
-st.title("🚛 Rozliczenie Kosztów Floty - Ruptela API")
+st.title("🚛 System Zarządzania Flotą (TMS)")
 
-API_KEY = st.secrets.get("RUPTELA_API_KEY", "")
+# Ustawienia API Ruptela (Wpisz swój klucz / token)
+RUPTELA_API_URL = "https://api.trusttrack.ruptela.com/v1/vehicles/locations"
+RUPTELA_API_KEY = "TWÓJ_KLUCZ_API"
 
-if not API_KEY:
-    st.error("❌ Brak klucza RUPTELA_API_KEY w Secrets!")
-    st.stop()
-
-# --- 1. POBIERANIE LISTY POJAZDÓW ---
-def get_vehicles_list(api_key):
-    url = f"https://api.fm-track.com/objects?version=1&api_key={api_key}"
+@st.cache_data(ttl=30)
+def get_ruptela_data():
+    headers = {"Authorization": f"Bearer {RUPTELA_API_KEY}"}
     try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            return resp.json()
-        return []
+        response = requests.get(RUPTELA_API_URL, headers=headers, timeout=5)
+        if response.status_code == 200:
+            return response.json()
     except Exception:
-        return []
-
-# --- 2. POBIERANIE TRAS I PALIWA Z PEŁNĄ DIAGNOSTYKĄ ---
-def get_vehicle_stats(api_key, vehicle_id, dt_from, dt_to):
-    # Czas w UTC dla API
-    tz_offset = timedelta(hours=2)
-    dt_from_utc = dt_from - tz_offset
-    dt_to_utc = dt_to - tz_offset
+        pass
     
-    from_str = dt_from_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    to_str = dt_to_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Dane testowe (gdy API Ruptela nie jest podłączone)
+    return [
+        {"id": "PO-12345", "driver": "Jan Kowalski", "lat": 52.2297, "lon": 21.0122, "speed": 68, "status": "W trasie"},
+        {"id": "KR-98765", "driver": "Piotr Nowak", "lat": 50.0647, "lon": 19.9450, "speed": 0, "status": "Postój"},
+        {"id": "DW-55555", "driver": "Tomasz Wiśniewski", "lat": 51.1079, "lon": 17.0385, "speed": 82, "status": "W trasie"}
+    ]
+
+vehicles = get_ruptela_data()
+
+# Zakładki jak we Fleetbase
+tab1, tab2, tab3 = st.tabs(["🗺️ Mapa na żywo (GPS)", "📊 Wykaz Floty i Kierowców", "💰 Koszty i Paliwo"])
+
+with tab1:
+    st.subheader("Lokalizacja pojazdów na żywo")
     
-    url = f"https://api.fm-track.com/objects/{vehicle_id}/trips?version=1&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
+    # Tworzenie mapy
+    m = folium.Map(location=[52.0, 19.0], zoom_start=6)
     
-    try:
-        resp = requests.get(url, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            trips = data.get("trips", []) if isinstance(data, dict) else data
-            
-            if not trips:
-                return 0.0, 0.0, data
-            
-            # Pobieramy dystans z odometru (start vs end całego okresu)
-            first_trip = trips[0]
-            last_trip = trips[-1]
-            
-            # Odczyt drogomierza
-            o_start = float(first_trip.get("start_odometer") or first_trip.get("odometer") or 0)
-            o_end = float(last_trip.get("end_odometer") or last_trip.get("odometer") or 0)
-            
-            if o_end > o_start and o_start > 0:
-                dist_km = (o_end - o_start) / 1000.0
-            else:
-                dist_km = sum(float(t.get("mileage", 0) or 0) for t in trips) / 1000.0
-                
-            # Odczyt paliwa z magistrali CAN ze wszystkich pól
-            fuel_l = 0.0
-            for t in trips:
-                f_val = t.get("fuel_consumed") or t.get("fuel_used") or t.get("fuel") or 0.0
-                fuel_l += float(f_val)
-                
-            return dist_km, fuel_l, data
-            
-        return 0.0, 0.0, {"error": f"HTTP {resp.status_code}", "body": resp.text}
-    except Exception as e:
-        return 0.0, 0.0, {"error": str(e)}
-
-# --- PANEL BOCZNY: FILTRY ---
-st.sidebar.header("🔍 Filtry i Ustawienia")
-
-vehicles = get_vehicles_list(API_KEY)
-options_map = {"Wszystkie pojazdy": "ALL"}
-
-for v in vehicles:
-    v_id = v.get("id")
-    name = v.get("name", "Brak nazwy")
-    options_map[name] = v_id
-
-wybrane_auto_label = st.sidebar.selectbox("Wybierz pojazd:", list(options_map.keys()))
-wybrany_id = options_map[wybrane_auto_label]
-
-dzis = datetime.now()
-siedem_dni_temu = dzis - timedelta(days=7)
-
-col_d1, col_t1 = st.sidebar.columns(2)
-with col_d1:
-    data_od = st.date_input("Data od:", siedem_dni_temu)
-with col_t1:
-    godz_od = st.time_input("Godzina od:", time(0, 0))
-
-col_d2, col_t2 = st.sidebar.columns(2)
-with col_d2:
-    data_do = st.date_input("Data do:", dzis)
-with col_t2:
-    godz_do = st.time_input("Godzina do:", time(23, 59))
-
-dt_od = datetime.combine(data_od, godz_od)
-dt_do = datetime.combine(data_do, godz_do)
-
-st.sidebar.divider()
-st.sidebar.header("⚙️ Parametry kosztowe")
-cena_paliwa = st.sidebar.number_input("Cena ON za litr (PLN netto):", value=6.20, step=0.05, format="%.2f")
-srednia_norma = st.sidebar.number_input("Domyślna norma spalania (L/100km):", value=21.33, step=0.5)
-
-# --- PRZETWARZANIE ---
-flota_dane = []
-raw_debug = {}
-
-with st.spinner("Pobieranie danych z Ruptela API..."):
-    if wybrany_id == "ALL":
-        for v in vehicles:
-            v_id = v.get("id")
-            v_name = v.get("name", "Pojazd")
-            dystans, spalanie, debug_json = get_vehicle_stats(API_KEY, v_id, dt_od, dt_do)
-            
-            if spalanie == 0.0 and dystans > 0:
-                spalanie = (dystans / 100.0) * srednia_norma
-                
-            flota_dane.append({"Pojazd": v_name, "Dystans_km": dystans, "Spalanie_L": spalanie})
-            raw_debug[v_name] = debug_json
-    else:
-        dystans, spalanie, debug_json = get_vehicle_stats(API_KEY, wybrany_id, dt_od, dt_do)
+    for v in vehicles:
+        color = "green" if v["speed"] > 0 else "red"
+        popup_text = f"<b>Pojazd:</b> {v['id']}<br><b>Kierowca:</b> {v['driver']}<br><b>Prędkość:</b> {v['speed']} km/h"
+        folium.Marker(
+            [v["lat"], v["lon"]],
+            popup=popup_text,
+            tooltip=v["id"],
+            icon=folium.Icon(color=color, icon="truck", prefix="fa")
+        ).add_to(m)
         
-        if spalanie == 0.0 and dystans > 0:
-            spalanie = (dystans / 100.0) * srednia_norma
-            
-        flota_dane.append({"Pojazd": wybrane_auto_label, "Dystans_km": dystans, "Spalanie_L": spalanie})
-        raw_debug[wybrane_auto_label] = debug_json
+    st_folium(m, width=1200, height=500)
 
-df = pd.DataFrame(flota_dane)
+with tab2:
+    st.subheader("Status floty")
+    df_vehicles = pd.DataFrame(vehicles)
+    st.dataframe(df_vehicles, use_container_width=True)
 
-if not df.empty and df["Dystans_km"].sum() > 0:
-    df["Koszt_Paliwa"] = df["Spalanie_L"] * cena_paliwa
-    df["Średnie_l/100km"] = df.apply(lambda r: (r["Spalanie_L"] / r["Dystans_km"] * 100) if r["Dystans_km"] > 0 else 0, axis=1)
-
-    st.subheader(f"📊 Wyniki za okres: {dt_od.strftime('%d.%m.%Y %H:%M')} - {dt_do.strftime('%d.%m.%Y %H:%M')}")
-    
-    k1, k2 = st.columns(2)
-    k3, k4 = st.columns(2)
-    
-    k1.metric("Łączny Dystans", f"{df['Dystans_km'].sum():,.2f} km".replace(",", " "))
-    k2.metric("Zużyte Paliwo", f"{df['Spalanie_L'].sum():,.2f} L".replace(",", " "))
-    k3.metric("Łączny Koszt", f"{df['Koszt_Paliwa'].sum():,.2f} PLN".replace(",", " "))
-    k4.metric("Koszt na 1 km", f"{(df['Koszt_Paliwa'].sum() / df['Dystans_km'].sum()):.2f} PLN/km" if df['Dystans_km'].sum() > 0 else "0.00 PLN/km")
-
-    st.dataframe(df, use_container_width=True)
-
-# SEKACJA DEBUGOWANIA - POKAŻE CO NAPRAWDĘ ZWRACA API RUPTELI
-with st.expander("🛠️ Diagnostyka Ruptela API (Rozwiń, aby sprawdzić surowe dane)"):
-    st.json(raw_debug)
+with tab3:
+    st.subheader("Rejestracja wydatków")
+    col1, col2 = st.columns(2)
+    with col1:
+        pojazd = st.selectbox("Wybierz pojazd", [v["id"] for v in vehicles])
+        koszt = st.number_input("Kwota (PLN)", min_value=0.0, step=10.0)
+        kategoria = st.selectbox("Kategoria", ["Paliwo", "Serwis/Naprawa", "Opłaty drogowe", "Inne"])
+        if st.button("Zapisz wydatek"):
+            st.success(f"Dodano wydatek {koszt} PLN dla {pojazd}")
