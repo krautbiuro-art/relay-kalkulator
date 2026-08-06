@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 
 st.set_page_config(
     page_title="Koszty Floty - Ruptela",
@@ -30,11 +30,11 @@ def get_vehicles_list(api_key):
     except Exception:
         return []
 
-# --- 2. POBIERANIE TRAS I SUMOWANIE DYSTANSU (METRY -> KM) ---
+# --- 2. POBIERANIE TRAS I SUMOWANIE DYSTANSU (Z UWZGLĘDNIENIEM GODZIN) ---
 @st.cache_data(ttl=60)
-def get_vehicle_trips(api_key, vehicle_id, date_from, date_to):
-    from_str = date_from.strftime("%Y-%m-%dT00:00:00Z")
-    to_str = date_to.strftime("%Y-%m-%dT23:59:59Z")
+def get_vehicle_trips(api_key, vehicle_id, dt_from, dt_to):
+    from_str = dt_from.strftime("%Y-%m-%dT%H:%M:%SZ")
+    to_str = dt_to.strftime("%Y-%m-%dT%H:%M:%SZ")
     
     url = f"https://api.fm-track.com/objects/{vehicle_id}/trips?version=1&from_datetime={from_str}&to_datetime={to_str}&api_key={api_key}"
     
@@ -51,17 +51,14 @@ def get_vehicle_trips(api_key, vehicle_id, date_from, date_to):
             total_fuel = 0.0
             
             for trip in trips_list:
-                # 'mileage' w odczycie odcinka Rupteli to dystans w metrach
                 dist_m = trip.get("mileage", 0.0)
                 if dist_m:
                     total_distance_m += float(dist_m)
                 
-                # Odczyt paliwa z magistrali CAN (jeśli dostępne w tripie)
                 fuel = trip.get("fuel_consumed", trip.get("fuel", trip.get("fuel_used", 0.0)))
                 if fuel:
                     total_fuel += float(fuel)
             
-            # Konwersja metrów na kilometry
             total_distance_km = total_distance_m / 1000.0
             
             return total_distance_km, total_fuel
@@ -86,8 +83,21 @@ wybrany_id = options_map[wybrane_auto_label]
 dzis = datetime.now()
 siedem_dni_temu = dzis - timedelta(days=7)
 
-data_od = st.sidebar.date_input("Data od:", siedem_dni_temu)
-data_do = st.sidebar.date_input("Data do:", dzis)
+col_d1, col_t1 = st.sidebar.columns(2)
+with col_d1:
+    data_od = st.date_input("Data od:", siedem_dni_temu)
+with col_t1:
+    godz_od = st.time_input("Godzina od:", time(0, 0))
+
+col_d2, col_t2 = st.sidebar.columns(2)
+with col_d2:
+    data_do = st.date_input("Data do:", dzis)
+with col_t2:
+    godz_do = st.time_input("Godzina do:", time(23, 59))
+
+# Łączenie daty i godziny w jeden obiekt datetime
+dt_od = datetime.combine(data_od, godz_od)
+dt_do = datetime.combine(data_do, godz_do)
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Parametry kosztowe")
@@ -103,7 +113,7 @@ with st.spinner("Pobieranie przejazdów z Rupteli..."):
         for v in vehicles:
             v_id = v.get("id")
             v_name = v.get("name", "Pojazd")
-            dystans, spalanie = get_vehicle_trips(API_KEY, v_id, data_od, data_do)
+            dystans, spalanie = get_vehicle_trips(API_KEY, v_id, dt_od, dt_do)
             
             if spalanie == 0.0 and dystans > 0:
                 spalanie = (dystans / 100.0) * srednia_norma
@@ -114,7 +124,7 @@ with st.spinner("Pobieranie przejazdów z Rupteli..."):
                 "Spalanie_L": spalanie
             })
     else:
-        dystans, spalanie = get_vehicle_trips(API_KEY, wybrany_id, data_od, data_do)
+        dystans, spalanie = get_vehicle_trips(API_KEY, wybrany_id, dt_od, dt_do)
         
         if spalanie == 0.0 and dystans > 0:
             spalanie = (dystans / 100.0) * srednia_norma
@@ -129,7 +139,7 @@ df = pd.DataFrame(flota_dane)
 
 # KONTROLA BRAKU DANYCH
 if df.empty or df["Dystans_km"].sum() == 0:
-    st.info(f"ℹ️ Brak zarejestrowanych tras w wybranym okresie ({data_od.strftime('%d.%m.%Y')} - {data_do.strftime('%d.%m.%Y')}). Upewnij się, że pojazdy wykonywały przejazdy w tych dniach.")
+    st.info(f"ℹ️ Brak zarejestrowanych tras w wybranym okresie ({dt_od.strftime('%d.%m.%Y %H:%M')} - {dt_do.strftime('%d.%m.%Y %H:%M')}). Upewnij się, że pojazdy wykonywały przejazdy w tym czasie.")
 else:
     # KALKULACJE KOSZTOWE
     df["Koszt_Paliwa"] = df["Spalanie_L"] * cena_paliwa
@@ -144,7 +154,7 @@ else:
     sredni_koszt_km = calkowity_koszt / suma_km if suma_km > 0 else 0.0
 
     # WSKAŹNIKI (KPI)
-    st.subheader(f"📊 Wyniki za okres: {data_od.strftime('%d.%m.%Y')} - {data_do.strftime('%d.%m.%Y')}")
+    st.subheader(f"📊 Wyniki za okres: {dt_od.strftime('%d.%m.%Y %H:%M')} - {dt_do.strftime('%d.%m.%Y %H:%M')}")
     
     k1, k2 = st.columns(2)
     k3, k4 = st.columns(2)
