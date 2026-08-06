@@ -30,9 +30,9 @@ def get_vehicles_list(api_key):
     except Exception:
         return []
 
-# --- 2. PRECYZYJNE OBLICZANIE ODOMETRU I PALIWA Z APEX TRAS ---
+# --- 2. POBIERANIE I PRZELICZANIE TRAS (PRZELICZNIK METRY -> KM) ---
 @st.cache_data(ttl=60)
-def get_vehicle_exact_metrics(api_key, vehicle_id, dt_from, dt_to):
+def get_vehicle_trips(api_key, vehicle_id, dt_from, dt_to):
     from_str = dt_from.strftime("%Y-%m-%dT%H:%M:%SZ")
     to_str = dt_to.strftime("%Y-%m-%dT%H:%M:%SZ")
     
@@ -40,49 +40,34 @@ def get_vehicle_exact_metrics(api_key, vehicle_id, dt_from, dt_to):
     
     try:
         resp = requests.get(url, timeout=15)
-        if resp.status_code != 200:
-            return 0.0, 0.0
+        if resp.status_code == 200:
+            res_data = resp.json()
+            trips_list = res_data.get("trips", []) if isinstance(res_data, dict) else []
             
-        data = resp.json()
-        trips = data.get("trips", []) if isinstance(data, dict) else []
-        
-        if not trips:
-            return 0.0, 0.0
+            if not trips_list:
+                return 0.0, 0.0
             
-        # 1. POBRANIE WIRTUALNEGO ODOMETRU (ODCZYT CAN / GPS ODOMETER)
-        # Szukamy odometru w pierwszym i ostatnim punkcie odcinka
-        first_trip = trips[0]
-        last_trip = trips[-1]
-        
-        start_odo = first_trip.get("start_odometer") or first_trip.get("odometer_start") or first_trip.get("odometer") or 0.0
-        end_odo = last_trip.get("end_odometer") or last_trip.get("odometer_end") or last_trip.get("odometer") or 0.0
-        
-        start_odo = float(start_odo)
-        end_odo = float(end_odo)
-        
-        # Jeśli odometry są wyrażone w metrach
-        if start_odo > 1000000:
-            start_odo /= 1000.0
-        if end_odo > 1000000:
-            end_odo /= 1000.0
+            total_distance_m = 0.0
+            total_fuel_can = 0.0
+            has_can_fuel = False
             
-        distance = 0.0
-        if end_odo > start_odo and start_odo > 0:
-            distance = end_odo - start_odo
-        else:
-            # Rezerwowo: suma dystansów z poszczególnych tras
-            for t in trips:
-                d = float(t.get("mileage", t.get("distance", 0.0)))
-                distance += (d / 1000.0 if d > 10000 else d)
+            for trip in trips_list:
+                # Dystans odcinka w metrach z API
+                dist_m = trip.get("mileage", 0.0)
+                if dist_m:
+                    total_distance_m += float(dist_m)
                 
-        # 2. SUMOWANIE ZUŻYCIA PALIWA
-        total_fuel = 0.0
-        for t in trips:
-            f = float(t.get("fuel_consumed", t.get("fuel", t.get("fuel_used", 0.0))))
-            total_fuel += f
+                # Opcjonalne pobranie paliwa z CAN, jeśli występuje w API
+                fuel = trip.get("fuel_consumed", trip.get("fuel", trip.get("fuel_used", None)))
+                if fuel is not None:
+                    total_fuel_can += float(fuel)
+                    has_can_fuel = True
             
-        return distance, total_fuel
-        
+            # Konwersja z metrów na kilometry
+            total_distance_km = total_distance_m / 1000.0
+            
+            return total_distance_km, (total_fuel_can if has_can_fuel else 0.0)
+        return 0.0, 0.0
     except Exception:
         return 0.0, 0.0
 
@@ -127,12 +112,12 @@ oplaty_drogowe = st.sidebar.number_input("Dodatkowe koszty / e-TOLL (PLN):", val
 # --- PRZETWARZANIE DANYCH ---
 flota_dane = []
 
-with st.spinner("Pobieranie dokładnego kilometrażu z Ruptela API..."):
+with st.spinner("Pobieranie i przeliczanie tras z Ruptela API..."):
     if wybrany_id == "ALL":
         for v in vehicles:
             v_id = v.get("id")
             v_name = v.get("name", "Pojazd")
-            dystans, spalanie = get_vehicle_exact_metrics(API_KEY, v_id, dt_od, dt_do)
+            dystans, spalanie = get_vehicle_trips(API_KEY, v_id, dt_od, dt_do)
             
             if spalanie == 0.0 and dystans > 0:
                 spalanie = (dystans / 100.0) * srednia_norma
@@ -143,7 +128,7 @@ with st.spinner("Pobieranie dokładnego kilometrażu z Ruptela API..."):
                 "Spalanie_L": spalanie
             })
     else:
-        dystans, spalanie = get_vehicle_exact_metrics(API_KEY, wybrany_id, dt_od, dt_do)
+        dystans, spalanie = get_vehicle_trips(API_KEY, wybrany_id, dt_od, dt_do)
         
         if spalanie == 0.0 and dystans > 0:
             spalanie = (dystans / 100.0) * srednia_norma
